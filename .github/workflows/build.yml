@@ -366,23 +366,43 @@ jobs:
           J = "TMessagesProj/src/main/java/org/telegram/"
 
 
+          import os
+
           FAILED = {}
+          PATHS = {}
           CUR = [None]
-          MC = "messenger/MessagesController.java"
+          CRIT = []
+          # если эти патчи не подошли, весь файл не трогаем
+          FILE_CRIT = ("chat-import", "st-import")
 
 
           def load(p):
               CUR[0] = p
               FAILED[p] = False
-              return open(J + p, encoding="utf-8").read()
+              path = J + p
+              if not os.path.exists(path):
+                  base = os.path.basename(p)
+                  found = None
+                  for root, _, files in os.walk("TMessagesProj/src"):
+                      if base in files:
+                          found = os.path.join(root, base)
+                          break
+                  if not found:
+                      print("NOT FOUND (skip):", p)
+                      FAILED[p] = True
+                      return ""
+                  print("moved path:", p, "->", found)
+                  path = found
+              PATHS[p] = path
+              return open(path, encoding="utf-8").read()
 
 
           def save(p, s):
-              dep = p.endswith("SendMessagesHelper.java") and FAILED.get(MC)
-              if FAILED.get(p) or dep:
-                  print("SKIP FILE (patch failed, file untouched):", p)
+              dep = p.endswith("SendMessagesHelper.java") and CRIT
+              if FAILED.get(p) or dep or p not in PATHS:
+                  print("SKIP FILE (file untouched):", p)
                   return
-              open(J + p, "w", encoding="utf-8").write(s)
+              open(PATHS[p], "w", encoding="utf-8").write(s)
               print("saved", p)
 
 
@@ -390,7 +410,17 @@ jobs:
               ms = list(re.finditer(pat, s))
               if len(ms) != count:
                   print("WARN %s: matches=%d (expected %d)" % (name, len(ms), count))
-                  FAILED[CUR[0]] = True
+                  for tok in re.findall(r"[A-Za-z_]{8,}", pat):
+                      hits = [l.strip()[:150] for l in s.split("\n") if tok in l][:3]
+                      if hits:
+                          print("   hint [%s]:" % tok)
+                          for h in hits:
+                              print("     ", h)
+                          break
+                  if name == "mc-complete-read":
+                      CRIT.append(name)
+                  if name in FILE_CRIT:
+                      FAILED[CUR[0]] = True
                   return s
               for m in reversed(ms):
                   s = s[:m.start()] + fn(m) + s[m.end():]
@@ -594,23 +624,43 @@ jobs:
           J = "TMessagesProj/src/main/java/org/telegram/"
 
 
+          import os
+
           FAILED = {}
+          PATHS = {}
           CUR = [None]
-          MC = "messenger/MessagesController.java"
+          CRIT = []
+          # если эти патчи не подошли, весь файл не трогаем
+          FILE_CRIT = ("chat-import", "st-import")
 
 
           def load(p):
               CUR[0] = p
               FAILED[p] = False
-              return open(J + p, encoding="utf-8").read()
+              path = J + p
+              if not os.path.exists(path):
+                  base = os.path.basename(p)
+                  found = None
+                  for root, _, files in os.walk("TMessagesProj/src"):
+                      if base in files:
+                          found = os.path.join(root, base)
+                          break
+                  if not found:
+                      print("NOT FOUND (skip):", p)
+                      FAILED[p] = True
+                      return ""
+                  print("moved path:", p, "->", found)
+                  path = found
+              PATHS[p] = path
+              return open(path, encoding="utf-8").read()
 
 
           def save(p, s):
-              dep = p.endswith("SendMessagesHelper.java") and FAILED.get(MC)
-              if FAILED.get(p) or dep:
-                  print("SKIP FILE (patch failed, file untouched):", p)
+              dep = p.endswith("SendMessagesHelper.java") and CRIT
+              if FAILED.get(p) or dep or p not in PATHS:
+                  print("SKIP FILE (file untouched):", p)
                   return
-              open(J + p, "w", encoding="utf-8").write(s)
+              open(PATHS[p], "w", encoding="utf-8").write(s)
               print("saved", p)
 
 
@@ -618,7 +668,17 @@ jobs:
               ms = list(re.finditer(pat, s))
               if len(ms) != count:
                   print("WARN %s: matches=%d (expected %d)" % (name, len(ms), count))
-                  FAILED[CUR[0]] = True
+                  for tok in re.findall(r"[A-Za-z_]{8,}", pat):
+                      hits = [l.strip()[:150] for l in s.split("\n") if tok in l][:3]
+                      if hits:
+                          print("   hint [%s]:" % tok)
+                          for h in hits:
+                              print("     ", h)
+                          break
+                  if name == "mc-complete-read":
+                      CRIT.append(name)
+                  if name in FILE_CRIT:
+                      FAILED[CUR[0]] = True
                   return s
               for m in reversed(ms):
                   s = s[:m.start()] + fn(m) + s[m.end():]
@@ -677,17 +737,17 @@ jobs:
                     lambda m: m.group(0) + "\n        if (GhostMode.blockAds()) {\n            return;\n        }")
           s = patch(s, "chat-const",
                     r"private final static int OPTION_FACT_CHECK = 106;",
-                    lambda m: m.group(0) + "\n    private final static int OPTION_FLUX_HISTORY = 9001;")
+                    lambda m: m.group(0) + "\n    private final static int OPTION_FLUX_HISTORY__ = 9001;")
           s = patch(s, "chat-menu",
                     r"\n([ \t]*)MessageObject msg = selectedObjectGroup != null \? selectedObjectGroup\.findPrimaryMessageObject\(\) : selectedObject;\s*\n\s*if \(msg != null && msg\.isFactCheckable\(\)",
                     lambda m: "\n" + m.group(1) + "if (FluxStore.hasEdits(selectedObject)) {\n"
                     + m.group(1) + "    items.add(\"История правок\");\n"
-                    + m.group(1) + "    options.add(OPTION_FLUX_HISTORY);\n"
+                    + m.group(1) + "    options.add(9001);\n"
                     + m.group(1) + "    icons.add(R.drawable.msg_log);\n"
                     + m.group(1) + "}" + m.group(0))
           s = patch(s, "chat-handler",
                     r"\n([ \t]*)case OPTION_FACT_CHECK: \{",
-                    lambda m: "\n" + m.group(1) + "case OPTION_FLUX_HISTORY: {\n"
+                    lambda m: "\n" + m.group(1) + "case 9001: {\n"
                     + m.group(1) + "    FluxStore.showEditHistory(getParentActivity(), selectedObject);\n"
                     + m.group(1) + "    break;\n"
                     + m.group(1) + "}" + m.group(0))
