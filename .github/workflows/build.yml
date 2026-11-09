@@ -257,11 +257,26 @@ jobs:
             done
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Найти готовые APK
+        run: |
+          mkdir -p out
+          find . -type f -name '*.apk' -not -path './out/*' -not -path '*/intermediates/*' -not -path './.git/*' | tee apk_list.txt
+          while read -r f; do
+            d="out/$(echo "${f#./}" | tr '/' '_')"
+            cp "$f" "$d"
+          done < apk_list.txt
+          ls -lh out
+          if [ -z "$(ls -A out)" ]; then
+            echo "::error::APK не найдены. Содержимое outputs:"
+            find . -type d -name outputs -not -path './.git/*' -exec ls -R {} \; | head -80
+            exit 1
+          fi
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: apk
-          path: TMessagesProj_App/build/outputs/apk/**/*.apk
+          path: out/*.apk
           if-no-files-found: error
 
       - name: Upload logs
