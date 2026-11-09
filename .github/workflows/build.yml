@@ -119,6 +119,16 @@ jobs:
               json.dump(d, open(f, "w", encoding="utf-8"), indent=2)
               print("google-services ->", f, [c["client_info"]["android_client_info"]["package_name"] for c in d["client"]])
 
+          # Huawei-модуль проверяет agconnect-services.json (на случай, если он всё же собирается)
+          for f in glob.glob("**/agconnect-services.json", recursive=True):
+              if f.startswith(".git"):
+                  continue
+              d = json.load(open(f, encoding="utf-8"))
+              if isinstance(d.get("client"), dict):
+                  d["client"]["package_name"] = pkg
+                  json.dump(d, open(f, "w", encoding="utf-8"), indent=2)
+                  print("agconnect ->", f, pkg)
+
           # Gradle init-скрипт: принудительно задаёт applicationId,
           # где бы он ни был объявлен в проекте
           open("rebrand.init.gradle", "w").write('''
@@ -225,7 +235,7 @@ jobs:
           if [ -n "$ABI" ] && [ "$ABI" != "all" ]; then
             EXTRA="$EXTRA -Pandroid.injected.build.abi=$ABI"
           fi
-          ./gradlew assembleAfatRelease --no-daemon --console=plain --max-workers=4 $EXTRA \
+          ./gradlew :TMessagesProj_App:assembleAfatRelease --no-daemon --console=plain --max-workers=4 $EXTRA \
             -PRELEASE_STORE_PASSWORD="$KS_STORE_PASS" \
             -PRELEASE_KEY_ALIAS="$KS_ALIAS" \
             -PRELEASE_KEY_PASSWORD="$KS_KEY_PASS" \
