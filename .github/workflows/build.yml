@@ -109,13 +109,34 @@ jobs:
           for f in glob.glob("**/google-services.json", recursive=True):
               if f.startswith(".git"):
                   continue
+              import copy
               d = json.load(open(f, encoding="utf-8"))
-              clients = d.get("client", [])[:1]
-              for c in clients:
-                  c["client_info"]["android_client_info"]["package_name"] = pkg
-              d["client"] = clients
+              clients = d.get("client", [])
+              extra = copy.deepcopy(clients[0])
+              extra["client_info"]["android_client_info"]["package_name"] = pkg
+              # оставляем исходные клиенты и добавляем клиент с новым именем пакета
+              d["client"] = clients + [extra]
               json.dump(d, open(f, "w", encoding="utf-8"), indent=2)
-              print("google-services ->", f)
+              print("google-services ->", f, [c["client_info"]["android_client_info"]["package_name"] for c in d["client"]])
+
+          # Gradle init-скрипт: принудительно задаёт applicationId,
+          # где бы он ни был объявлен в проекте
+          open("rebrand.init.gradle", "w").write('''
+          allprojects {
+              afterEvaluate { p ->
+                  if (p.plugins.hasPlugin('com.android.application')) {
+                      def pkg = System.getenv('APP_PACKAGE')
+                      p.android.defaultConfig.applicationId = pkg
+                      p.android.productFlavors.each { f ->
+                          if (f.applicationId != null) { f.applicationId = pkg }
+                          f.applicationIdSuffix = null
+                      }
+                      p.android.buildTypes.each { b -> b.applicationIdSuffix = null }
+                      println "REBRAND: " + p.path + " applicationId=" + pkg
+                  }
+              }
+          }
+          '''.replace("\n          ", "\n"))
 
           # название приложения
           p = "TMessagesProj/src/main/res/values/strings.xml"
@@ -198,8 +219,11 @@ jobs:
           set -o pipefail
           chmod +x gradlew
           EXTRA=""
+          if [ "$REBRAND" != "false" ] && [ -f rebrand.init.gradle ]; then
+            EXTRA="-I rebrand.init.gradle"
+          fi
           if [ -n "$ABI" ] && [ "$ABI" != "all" ]; then
-            EXTRA="-Pandroid.injected.build.abi=$ABI"
+            EXTRA="$EXTRA -Pandroid.injected.build.abi=$ABI"
           fi
           ./gradlew assembleAfatRelease --no-daemon --console=plain --max-workers=4 $EXTRA \
             -PRELEASE_STORE_PASSWORD="$KS_STORE_PASS" \
