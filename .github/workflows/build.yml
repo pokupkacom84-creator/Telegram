@@ -260,15 +260,21 @@ jobs:
       - name: Найти готовые APK
         run: |
           mkdir -p out
-          find . -type f -name '*.apk' -not -path './out/*' -not -path '*/intermediates/*' -not -path './.git/*' | tee apk_list.txt
+          echo "=== все .apk / .aab в проекте ==="
+          find . -type f \( -name '*.apk' -o -name '*.aab' \) -not -path './.git/*' -not -path './out/*' | tee all_pkgs.txt
+          echo "================================="
+          # приоритет: outputs/apk, затем intermediates/apk, затем любые *.apk приложения
+          grep -E 'TMessagesProj_App/build/outputs/apk/.*\.apk$' all_pkgs.txt > apk_list.txt || true
+          [ -s apk_list.txt ] || grep -E 'TMessagesProj_App/build/intermediates/apk/.*\.apk$' all_pkgs.txt > apk_list.txt || true
+          [ -s apk_list.txt ] || grep -E 'TMessagesProj_App/.*\.apk$' all_pkgs.txt > apk_list.txt || true
+          [ -s apk_list.txt ] || grep -E '\.apk$' all_pkgs.txt > apk_list.txt || true
           while read -r f; do
-            d="out/$(echo "${f#./}" | tr '/' '_')"
-            cp "$f" "$d"
+            cp "$f" "out/$(basename "$(dirname "$f")")_$(basename "$f")"
           done < apk_list.txt
           ls -lh out
           if [ -z "$(ls -A out)" ]; then
-            echo "::error::APK не найдены. Содержимое outputs:"
-            find . -type d -name outputs -not -path './.git/*' -exec ls -R {} \; | head -80
+            echo "::error::APK не найдены"
+            ls -R TMessagesProj_App/build/intermediates 2>/dev/null | grep -iE "apk|package" | head -50
             exit 1
           fi
 
