@@ -1,0 +1,1205 @@
+name: Build FluxGram
+
+on:
+  workflow_dispatch:
+
+env:
+  APP_NAME: FluxGram
+  APP_PACKAGE: com.fluxgram.app
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build nasm yasm make cmake perl
+
+      - name: Rebrand to FluxGram
+        run: |
+          # 1. Имя пакета (applicationId) во всех build.gradle
+          find . -name build.gradle -not -path "./TMessagesProj/jni/*" -print0 | xargs -0 sed -i -E \
+            "s/applicationId[ =]+[\"'][^\"']*[\"']/applicationId \"$APP_PACKAGE\"/"
+          # 2. Название приложения и текст "Telegram" в строках интерфейса (только текст, не имена ключей и не ссылки)
+          python3 - <<'PY'
+          import re, glob, os
+          name = os.environ["APP_NAME"]
+          pat = re.compile(r'(<string\b[^>]*>)(.*?)(</string>)', re.S)
+          def fix(m):
+              head, body, tail = m.groups()
+              body = re.sub(r'(?<![/@.\w])Telegram(?![\w/.])', name, body)
+              return head + body + tail
+          count = 0
+          for f in glob.glob('TMessagesProj/src/main/res/values*/strings*.xml'):
+              s = open(f, encoding='utf-8').read()
+              n = pat.sub(fix, s)
+              if n != s:
+                  open(f, 'w', encoding='utf-8').write(n)
+                  count += 1
+          print("changed files:", count)
+          PY
+          # 3. Явно задаём название приложения
+          sed -i -E "s#(<string name=\"AppName(Beta)?\"[^>]*>)[^<]*#\1$APP_NAME#" TMessagesProj/src/main/res/values/strings.xml
+          echo "--- проверка ---"
+          grep -rn "applicationId" --include=build.gradle . | grep -v jni || true
+          grep -n 'name="AppName' TMessagesProj/src/main/res/values/strings.xml || true
+
+      - name: Rebrand leftovers (Telegram / Telegram FOSS -> FluxGram)
+        run: |
+          python3 - <<'PY'
+          import os, re
+          name = os.environ["APP_NAME"]
+          skip = {".git", "jni", "build", ".gradle", "node_modules"}
+          changed = 0
+          for root, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs if d not in skip]
+              for fn in files:
+                  ext = fn.rsplit(".", 1)[-1]
+                  if ext not in ("xml", "gradle", "java", "kt", "properties"):
+                      continue
+                  p = os.path.join(root, fn)
+                  norm = p.replace("\\", "/")
+                  if ext == "xml" and "/res/" not in norm and fn != "AndroidManifest.xml":
+                      continue
+                  try:
+                      s = open(p, encoding="utf-8").read()
+                  except Exception:
+                      continue
+                  n = re.sub(r'\b(?:Telegram|FluxGram) (?:FOSS|Beta)\b', name, s)
+                  n = n.replace("Telegram for Android", name + " for Android")
+                  if fn == "AndroidManifest.xml":
+                      n = re.sub(r'(android:label=")Telegram[^"]*(")', r'\g<1>' + name + r'\g<2>', n)
+                  if ext == "gradle":
+                      n = re.sub(r'(resValue\s*\(?\s*["\']string["\']\s*,\s*["\']AppName(?:Beta)?["\']\s*,\s*["\'])[^"\']*',
+                                 r'\g<1>' + name, n)
+                  if ext == "xml" and "/res/values" in norm:
+                      n = re.sub(r'(<string name="AppName(?:Beta)?"[^>]*>)[^<]*', r'\g<1>' + name, n)
+                  if n != s:
+                      open(p, "w", encoding="utf-8").write(n)
+                      changed += 1
+          print("rebrand leftovers, files changed:", changed)
+          PY
+          echo "--- что осталось (должно быть пусто) ---"
+          grep -rIn --include=*.xml --include=*.gradle -e "Telegram FOSS" -e "Telegram Beta" . 2>/dev/null | grep -v -e "/jni/" -e "/.git/" | head -20 || true
+
+      - name: Add ID in profile and FluxGram settings
+        run: |
+          python3 - <<'PY'
+          import re
+          import sys
+
+          UI = "TMessagesProj/src/main/java/org/telegram/ui/"
+          P = UI + "ProfileActivity.java"
+          s = open(P, encoding="utf-8").read()
+
+
+          def one(name, pat, fn):
+              global s
+              ms = list(re.finditer(pat, s))
+              if len(ms) != 1:
+                  print("FAIL %s: matches=%d" % (name, len(ms)))
+                  sys.exit(1)
+              m = ms[0]
+              s = s[:m.start()] + fn(m) + s[m.end():]
+              print("ok", name)
+
+
+          # 1. поля
+          one("decl", r"private int languageRow;",
+              lambda m: "private int languageRow;\n    private int fluxRow;\n    private int idRow;")
+
+          # 2. сброс в updateRowsIds
+          one("reset-lang", r"\n([ \t]*)languageRow = -1;",
+              lambda m: m.group(0) + "\n" + m.group(1) + "fluxRow = -1;")
+          one("reset-user", r"\n([ \t]*)usernameRow = -1;",
+              lambda m: m.group(0) + "\n" + m.group(1) + "idRow = -1;")
+
+          # 3. строка «FluxGram» в настройках (после «Язык»)
+          one("assign-flux", r"\n([ \t]*)languageRow = rowCount\+\+;",
+              lambda m: m.group(0) + "\n" + m.group(1) + "fluxRow = rowCount++;")
+
+          # 4. строка ID в профиле пользователя (перед username)
+          one("assign-id-user",
+              r"\n([ \t]*)if \(user != null && username != null\) \{\s*\n\s*usernameRow = rowCount\+\+;",
+              lambda m: "\n" + m.group(1) + "if (FluxSettingsActivity.showId()) {\n" + m.group(1)
+              + "    idRow = rowCount++;\n" + m.group(1) + "}" + m.group(0))
+
+          # 5. строка ID в профиле чата/канала (по возможности, осторожно)
+          lines = s.split("\n")
+          patched = 0
+          for i in reversed(range(len(lines))):
+              if not re.match(r"\s*usernameRow = rowCount\+\+;", lines[i]):
+                  continue
+              ind = len(lines[i]) - len(lines[i].lstrip())
+              j = i - 1
+              while j >= 0 and (not lines[j].strip() or (len(lines[j]) - len(lines[j].lstrip())) >= ind):
+                  j -= 1
+              if j < 0:
+                  continue
+              head = lines[j].strip()
+              near = "\n".join(lines[max(0, j - 4):j + 1])
+              if (head.startswith("if (") and "username" in head.lower()
+                      and "user != null" not in head and "idRow = rowCount" not in near):
+                  pad = lines[j][:len(lines[j]) - len(lines[j].lstrip())]
+                  lines[j:j] = [pad + "if (FluxSettingsActivity.showId()) {", pad + "    idRow = rowCount++;", pad + "}"]
+                  patched += 1
+          s = "\n".join(lines)
+          print("chat id rows patched:", patched)
+
+          # 6. типы ячеек и кликабельность
+          one("type-detail",
+              r"position == phoneRow\s*\|\|\s*position == locationRow\s*\|\|\s*position == numberRow\s*\|\|\s*position == birthdayRow",
+              lambda m: m.group(0) + " || position == idRow")
+          one("type-text", r"position == languageRow\s*\|\|\s*position == dataRow",
+              lambda m: "position == fluxRow || " + m.group(0))
+          one("enabled", r"return\s+position == notificationRow\s*\|\|\s*position == numberRow",
+              lambda m: "return position == idRow || position == fluxRow || position == notificationRow || position == numberRow")
+
+          # 7. отрисовка
+          one("bind-flux",
+              r"\} else if \(position == languageRow\) \{\s*\n\s*textCell\.setTextAndValueAndIcon",
+              lambda m: "} else if (position == fluxRow) {\n"
+              "                        textCell.setTextAndIcon(\"FluxGram\", R.drawable.msg2_discussion, true);\n"
+              "                    " + m.group(0))
+          one("bind-id",
+              r"\} else if \(position == usernameRow\) \{\s*\n\s*String username = null;",
+              lambda m: "} else if (position == idRow) {\n"
+              "                        detailCell.setTextAndValue(getFluxIdText(), \"ID\", true);\n"
+              "                    " + m.group(0))
+
+          # 8. нажатия
+          one("click-flux",
+              r"\} else if \(position == languageRow\) \{\s*\n\s*presentFragment\(new LanguageSelectActivity\(\)\);",
+              lambda m: "} else if (position == fluxRow) {\n"
+              "                presentFragment(new FluxSettingsActivity());\n"
+              "            " + m.group(0))
+          one("click-id",
+              r"\} else if \(position == usernameRow\) \{\s*\n\s*processOnClickOrPress\(position, view, x, y\);",
+              lambda m: "} else if (position == idRow) {\n"
+              "                AndroidUtilities.addToClipboard(getFluxIdText());\n"
+              "                android.widget.Toast.makeText(getParentActivity(), \"ID скопирован\", android.widget.Toast.LENGTH_SHORT).show();\n"
+              "            " + m.group(0))
+
+          # 9. метод получения ID
+          one("id-method", r"private boolean processOnClickOrPress\(",
+              lambda m: "private String getFluxIdText() {\n"
+              "        if (userId != 0) {\n"
+              "            return String.valueOf(userId);\n"
+              "        }\n"
+              "        if (currentChat != null && ChatObject.isChannel(currentChat)) {\n"
+              "            return \"-100\" + chatId;\n"
+              "        }\n"
+              "        return \"-\" + chatId;\n"
+              "    }\n\n"
+              "    " + m.group(0))
+
+          open(P, "w", encoding="utf-8").write(s)
+
+          # 10. экран настроек FluxGram
+          java = r'''package org.telegram.ui;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.graphics.Typeface;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.SeekBar;
+          import android.widget.TextView;
+
+          import org.telegram.messenger.ApplicationLoader;
+          import org.telegram.messenger.AndroidUtilities;
+          import org.telegram.messenger.GhostMode;
+          import org.telegram.messenger.MessagesController;
+          import org.telegram.messenger.SharedConfig;
+          import org.telegram.messenger.R;
+          import org.telegram.ui.ActionBar.ActionBar;
+          import org.telegram.ui.ActionBar.BaseFragment;
+          import org.telegram.ui.ActionBar.Theme;
+          import org.telegram.ui.Cells.HeaderCell;
+          import org.telegram.ui.Cells.TextCheckCell;
+          import org.telegram.ui.Cells.TextInfoPrivacyCell;
+
+          public class FluxSettingsActivity extends BaseFragment {
+
+              private static final String PREFS = "fluxgram";
+              public static final String KEY_SHOW_ID = "show_id";
+
+              public static boolean showId() {
+                  return ApplicationLoader.applicationContext
+                          .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                          .getBoolean(KEY_SHOW_ID, true);
+              }
+
+              private static void saveBool(String key, boolean value) {
+                  ApplicationLoader.applicationContext
+                          .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                          .edit().putBoolean(key, value).apply();
+              }
+
+              private void addHeader(LinearLayout list, Context context, String text) {
+                  HeaderCell header = new HeaderCell(context);
+                  header.setText(text);
+                  list.addView(header, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+              }
+
+              private void addInfo(LinearLayout list, Context context, String text) {
+                  TextInfoPrivacyCell info = new TextInfoPrivacyCell(context);
+                  info.setText(text);
+                  info.setBackground(Theme.getThemedDrawableByKey(context, R.drawable.greydivider, Theme.key_windowBackgroundGrayShadow));
+                  list.addView(info, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+              }
+
+              private void addToggle(LinearLayout list, Context context, String text, final String key, boolean checked, boolean divider, final boolean ghost) {
+                  final TextCheckCell cell = new TextCheckCell(context);
+                  cell.setBackground(Theme.getSelectorDrawable(false));
+                  cell.setTextAndCheck(text, checked, divider);
+                  cell.setOnClickListener(v -> {
+                      boolean value = !cell.isChecked();
+                      cell.setChecked(value);
+                      if (ghost) {
+                          GhostMode.set(key, value);
+                      } else {
+                          saveBool(key, value);
+                      }
+                  });
+                  list.addView(cell, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+              }
+
+              private void addSlider(LinearLayout list, Context context, final String title, final int min, final int max, int value, final boolean isFont) {
+                  final TextView label = new TextView(context);
+                  label.setTextSize(16);
+                  label.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                  label.setText(title + ": " + value);
+                  label.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(12), AndroidUtilities.dp(21), 0);
+                  list.addView(label, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+                  SeekBar bar = new SeekBar(context);
+                  bar.setMax(max - min);
+                  bar.setProgress(value - min);
+                  bar.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(8), AndroidUtilities.dp(21), AndroidUtilities.dp(12));
+                  bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override
+                      public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                          label.setText(title + ": " + (progress + min));
+                      }
+
+                      @Override
+                      public void onStartTrackingTouch(SeekBar seekBar) {
+                      }
+
+                      @Override
+                      public void onStopTrackingTouch(SeekBar seekBar) {
+                          int v = seekBar.getProgress() + min;
+                          if (isFont) {
+                              SharedConfig.fontSize = v;
+                              SharedConfig.fontSizeIsDefault = false;
+                              SharedPreferences p = ApplicationLoader.applicationContext.getSharedPreferences("mainconfig", Context.MODE_PRIVATE);
+                              p.edit().putInt("fons_size", v).commit();
+                              Theme.createCommonMessageResources();
+                          } else {
+                              SharedConfig.bubbleRadius = v;
+                              MessagesController.getGlobalMainSettings().edit().putInt("bubbleRadius", v).commit();
+                          }
+                      }
+                  });
+                  list.addView(bar, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+              }
+
+              @Override
+              public View createView(Context context) {
+                  actionBar.setBackButtonImage(R.drawable.ic_ab_back);
+                  actionBar.setAllowOverlayTitle(true);
+                  actionBar.setTitle("FluxGram");
+                  actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
+                      @Override
+                      public void onItemClick(int id) {
+                          if (id == -1) {
+                              finishFragment();
+                          }
+                      }
+                  });
+
+                  ScrollView scroll = new ScrollView(context);
+                  scroll.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  LinearLayout list = new LinearLayout(context);
+                  list.setOrientation(LinearLayout.VERTICAL);
+                  scroll.addView(list, new ScrollView.LayoutParams(ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+
+                  addHeader(list, context, "Режим призрака");
+                  addToggle(list, context, "Режим призрака", GhostMode.KEY_ENABLED, GhostMode.isOn(), true, true);
+                  addToggle(list, context, "Не читать сообщения", GhostMode.KEY_NO_READ, GhostMode.get(GhostMode.KEY_NO_READ, true), true, true);
+                  addToggle(list, context, "Не читать истории", GhostMode.KEY_NO_STORIES, GhostMode.get(GhostMode.KEY_NO_STORIES, true), true, true);
+                  addToggle(list, context, "Не отправлять «онлайн»", GhostMode.KEY_NO_ONLINE, GhostMode.get(GhostMode.KEY_NO_ONLINE, true), true, true);
+                  addToggle(list, context, "Не отправлять «печатает»", GhostMode.KEY_NO_TYPING, GhostMode.get(GhostMode.KEY_NO_TYPING, true), true, true);
+                  addToggle(list, context, "Автоматический «офлайн»", GhostMode.KEY_AUTO_OFFLINE, GhostMode.get(GhostMode.KEY_AUTO_OFFLINE, true), false, true);
+                  addInfo(list, context, "Главный переключатель включает выбранные ниже опции. Каждую опцию можно отключить отдельно.");
+
+                  addToggle(list, context, "Читать при действиях", GhostMode.KEY_READ_ON_ACTIONS, GhostMode.get(GhostMode.KEY_READ_ON_ACTIONS, true), false, true);
+                  addInfo(list, context, "Автоматически читает сообщения чата при отправке нового сообщения или реакции.");
+
+                  addHeader(list, context, "Сообщения");
+                  addToggle(list, context, "Сохранять удалённые сообщения", GhostMode.KEY_KEEP_DELETED, GhostMode.keepDeleted(), true, true);
+                  addToggle(list, context, "Сохранять историю правок", GhostMode.KEY_KEEP_EDITS, GhostMode.keepEdits(), true, true);
+                  addToggle(list, context, "Разрешить копирование и сохранение из защищённых чатов", GhostMode.KEY_ALLOW_PROTECTED, GhostMode.allowProtected(), true, true);
+                  addToggle(list, context, "Отключить рекламу и спонсорские сообщения", GhostMode.KEY_BLOCK_ADS, GhostMode.blockAds(), false, true);
+                  addInfo(list, context, "Удалённые сообщения остаются в чате с пометкой «удалено». История правок открывается из меню сообщения. Настройки защищённых чатов применяются после перезапуска приложения.");
+
+                  addHeader(list, context, "Внешний вид");
+                  addSlider(list, context, "Радиус углов сообщений", 0, 30, SharedConfig.bubbleRadius, false);
+                  addSlider(list, context, "Размер шрифта", 12, 30, SharedConfig.fontSize, true);
+                  addInfo(list, context, "Изменения применяются при следующем открытии чата.");
+
+                  addHeader(list, context, "Пункты бокового меню");
+                  addToggle(list, context, "Скрыть «Мой профиль»", GhostMode.KEY_HIDE_DRAWER + 16, GhostMode.hideDrawer(16), true, true);
+                  addToggle(list, context, "Скрыть «Новая группа»", GhostMode.KEY_HIDE_DRAWER + 2, GhostMode.hideDrawer(2), true, true);
+                  addToggle(list, context, "Скрыть «Контакты»", GhostMode.KEY_HIDE_DRAWER + 6, GhostMode.hideDrawer(6), true, true);
+                  addToggle(list, context, "Скрыть «Звонки»", GhostMode.KEY_HIDE_DRAWER + 10, GhostMode.hideDrawer(10), true, true);
+                  addToggle(list, context, "Скрыть «Люди рядом»", GhostMode.KEY_HIDE_DRAWER + 12, GhostMode.hideDrawer(12), true, true);
+                  addToggle(list, context, "Скрыть «Избранное»", GhostMode.KEY_HIDE_DRAWER + 11, GhostMode.hideDrawer(11), true, true);
+                  addToggle(list, context, "Скрыть «Пригласить друзей»", GhostMode.KEY_HIDE_DRAWER + 7, GhostMode.hideDrawer(7), true, true);
+                  addToggle(list, context, "Скрыть «Возможности Telegram»", GhostMode.KEY_HIDE_DRAWER + 13, GhostMode.hideDrawer(13), false, true);
+                  addInfo(list, context, "Меню обновится после перезапуска приложения. «Настройки» скрыть нельзя, чтобы не потерять доступ к FluxGram.");
+
+                  addHeader(list, context, "Профиль");
+                  addToggle(list, context, "Показывать ID в профиле", KEY_SHOW_ID, showId(), false, false);
+                  addInfo(list, context, "");
+
+                  fragmentView = scroll;
+                  return fragmentView;
+              }
+          }
+          '''
+          open(UI + "FluxSettingsActivity.java", "w", encoding="utf-8").write(java)
+          print("FluxSettingsActivity.java written")
+          PY
+
+      - name: Add Ghost Mode (AyuGram-style)
+        run: |
+          python3 - <<'PY'
+          import re
+          import sys
+
+          J = "TMessagesProj/src/main/java/org/telegram/"
+
+
+          def load(p):
+              return open(J + p, encoding="utf-8").read()
+
+
+          def save(p, s):
+              open(J + p, "w", encoding="utf-8").write(s)
+
+
+          def patch(s, name, pat, fn, count=1):
+              ms = list(re.finditer(pat, s))
+              if len(ms) != count:
+                  print("FAIL %s: matches=%d (expected %d)" % (name, len(ms), count))
+                  sys.exit(1)
+              for m in reversed(ms):
+                  s = s[:m.start()] + fn(m) + s[m.end():]
+              print("ok", name)
+              return s
+
+
+          # ---------------- MessagesController ----------------
+          f = "messenger/MessagesController.java"
+          s = load(f)
+
+          # 1. не отправлять чтение (откладываем до действия пользователя)
+          s = patch(s, "mc-complete-read",
+                    r"private void completeReadTask\(ReadTask task\) \{",
+                    lambda m: '''private boolean ghostBypassRead;
+              private final java.util.HashMap<String, ReadTask> ghostPendingReads = new java.util.HashMap<>();
+
+              public void flushGhostReads(final long dialogId) {
+                  Utilities.stageQueue.postRunnable(() -> {
+                      ArrayList<ReadTask> toSend = new ArrayList<>();
+                      String prefix = dialogId + "_";
+                      java.util.Iterator<java.util.Map.Entry<String, ReadTask>> it = ghostPendingReads.entrySet().iterator();
+                      while (it.hasNext()) {
+                          java.util.Map.Entry<String, ReadTask> e = it.next();
+                          if (e.getKey().startsWith(prefix)) {
+                              toSend.add(e.getValue());
+                              it.remove();
+                          }
+                      }
+                      ghostBypassRead = true;
+                      try {
+                          for (int i = 0; i < toSend.size(); i++) {
+                              completeReadTask(toSend.get(i));
+                          }
+                      } finally {
+                          ghostBypassRead = false;
+                      }
+                  });
+              }
+
+              public void ghostOnUserAction(long dialogId) {
+                  if (!GhostMode.isOn()) {
+                      return;
+                  }
+                  if (GhostMode.readOnActions()) {
+                      flushGhostReads(dialogId);
+                  }
+                  if (GhostMode.autoOffline()) {
+                      Utilities.stageQueue.postRunnable(() -> {
+                          TLRPC.TL_account_updateStatus offlineReq = new TLRPC.TL_account_updateStatus();
+                          offlineReq.offline = true;
+                          getConnectionsManager().sendRequest(offlineReq, (response, error) -> {});
+                      }, 3000);
+                  }
+              }
+
+              private void completeReadTask(ReadTask task) {
+                  if (!ghostBypassRead && GhostMode.blockRead()) {
+                      ghostPendingReads.put(task.dialogId + "_" + task.replyId, task);
+                      return;
+                  }''')
+
+          # 2. не отправлять «онлайн»
+          s = patch(s, "mc-online",
+                    r"if \(!ignoreSetOnline && getConnectionsManager\(\)\.getPauseTime\(\) == 0",
+                    lambda m: "if (!ignoreSetOnline && !GhostMode.blockOnline() && getConnectionsManager().getPauseTime() == 0")
+          s = patch(s, "mc-offline",
+                    r"\} else if \(statusSettingState != 2 && !offlineSent && Math\.abs\(System\.currentTimeMillis\(\) - getConnectionsManager\(\)\.getPauseTime\(\)\) >= 2000\) \{",
+                    lambda m: "} else if ((!GhostMode.blockOnline() || GhostMode.autoOffline()) && statusSettingState != 2 && !offlineSent && Math.abs(System.currentTimeMillis() - getConnectionsManager().getPauseTime()) >= 2000) {")
+
+          # 3. не отправлять «печатает»
+          s = patch(s, "mc-typing",
+                    r"public boolean sendTyping\(long dialogId, long threadMsgId, int action, String emojicon, int classGuid\) \{",
+                    lambda m: m.group(0) + "\n        if (GhostMode.blockTyping()) {\n            return false;\n        }")
+          save(f, s)
+
+          # ---------------- SendMessagesHelper ----------------
+          f = "messenger/SendMessagesHelper.java"
+          s = load(f)
+          s = patch(s, "smh-send",
+                    r"\n([ \t]*)long peer = sendMessageParams\.peer;",
+                    lambda m: m.group(0) + "\n" + m.group(1) + "getMessagesController().ghostOnUserAction(peer);")
+          s = patch(s, "smh-reaction",
+                    r"public void sendReaction\(MessageObject messageObject, ArrayList<ReactionsLayoutInBubble\.VisibleReaction> visibleReactions, ReactionsLayoutInBubble\.VisibleReaction addedReaction, boolean big, boolean addToRecent, BaseFragment parentFragment, Runnable callback\) \{",
+                    lambda m: m.group(0) + "\n        if (messageObject != null) {\n            getMessagesController().ghostOnUserAction(messageObject.getDialogId());\n        }")
+          save(f, s)
+
+          # ---------------- StoriesController ----------------
+          f = "ui/Stories/StoriesController.java"
+          s = load(f)
+          s = patch(s, "st-import", r"(package [^;]+;\n)",
+                    lambda m: m.group(1) + "\nimport org.telegram.messenger.GhostMode;")
+          s = patch(s, "st-read",
+                    r"(req\.max_id = storyItem\.id;\s*\n)([ \t]*)(ConnectionsManager\.getInstance\(currentAccount\)\.sendRequest\(req, \(response, error\) -> \{\}\);)",
+                    lambda m: m.group(1) + m.group(2) + "if (!GhostMode.blockStories()) {\n" + m.group(2) + "    " + m.group(3) + "\n" + m.group(2) + "}")
+          s = patch(s, "st-views",
+                    r"(req\.id\.add\(storyId\);\s*\n)([ \t]*)(ConnectionsManager\.getInstance\(currentAccount\)\.sendRequest\(req, \(response, error\) -> \{\}\);)",
+                    lambda m: m.group(1) + m.group(2) + "if (!GhostMode.blockStories()) {\n" + m.group(2) + "    " + m.group(3) + "\n" + m.group(2) + "}")
+          save(f, s)
+          print("ghost patches applied")
+
+          java = r'''package org.telegram.messenger;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+
+          public class GhostMode {
+
+              private static final String PREFS = "fluxgram";
+
+              public static final String KEY_ENABLED = "ghost_enabled";
+              public static final String KEY_NO_READ = "ghost_no_read";
+              public static final String KEY_NO_STORIES = "ghost_no_stories";
+              public static final String KEY_NO_ONLINE = "ghost_no_online";
+              public static final String KEY_NO_TYPING = "ghost_no_typing";
+              public static final String KEY_AUTO_OFFLINE = "ghost_auto_offline";
+              public static final String KEY_READ_ON_ACTIONS = "ghost_read_on_actions";
+
+              private static SharedPreferences prefs() {
+                  return ApplicationLoader.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+              }
+
+              public static boolean get(String key, boolean def) {
+                  try {
+                      return prefs().getBoolean(key, def);
+                  } catch (Throwable t) {
+                      return def;
+                  }
+              }
+
+              public static void set(String key, boolean value) {
+                  prefs().edit().putBoolean(key, value).apply();
+              }
+
+              public static boolean isOn() {
+                  return get(KEY_ENABLED, false);
+              }
+
+              public static boolean blockRead() {
+                  return isOn() && get(KEY_NO_READ, true);
+              }
+
+              public static boolean blockStories() {
+                  return isOn() && get(KEY_NO_STORIES, true);
+              }
+
+              public static boolean blockOnline() {
+                  return isOn() && get(KEY_NO_ONLINE, true);
+              }
+
+              public static boolean blockTyping() {
+                  return isOn() && get(KEY_NO_TYPING, true);
+              }
+
+              public static boolean autoOffline() {
+                  return isOn() && get(KEY_AUTO_OFFLINE, true);
+              }
+
+              public static boolean readOnActions() {
+                  return isOn() && get(KEY_READ_ON_ACTIONS, true);
+              }
+
+              // ---- дополнительные функции FluxGram (не зависят от режима призрака) ----
+              public static final String KEY_KEEP_DELETED = "keep_deleted";
+              public static final String KEY_KEEP_EDITS = "keep_edits";
+              public static final String KEY_ALLOW_PROTECTED = "allow_protected";
+              public static final String KEY_BLOCK_ADS = "block_ads";
+              public static final String KEY_HIDE_DRAWER = "hide_drawer_";
+
+              public static boolean keepDeleted() {
+                  return get(KEY_KEEP_DELETED, true);
+              }
+
+              public static boolean keepEdits() {
+                  return get(KEY_KEEP_EDITS, true);
+              }
+
+              public static boolean allowProtected() {
+                  return get(KEY_ALLOW_PROTECTED, true);
+              }
+
+              public static boolean blockAds() {
+                  return get(KEY_BLOCK_ADS, true);
+              }
+
+              public static boolean hideDrawer(int itemId) {
+                  return get(KEY_HIDE_DRAWER + itemId, false);
+              }
+          }
+          '''
+          open(J + "messenger/GhostMode.java", "w", encoding="utf-8").write(java)
+          print("GhostMode.java written")
+          PY
+
+      - name: Add FluxGram features (deleted msgs, edits, protected content, ads, appearance)
+        run: |
+          python3 - <<'PY'
+          import re
+          import sys
+
+          J = "TMessagesProj/src/main/java/org/telegram/"
+
+
+          def load(p):
+              return open(J + p, encoding="utf-8").read()
+
+
+          def save(p, s):
+              open(J + p, "w", encoding="utf-8").write(s)
+
+
+          def patch(s, name, pat, fn, count=1):
+              ms = list(re.finditer(pat, s))
+              if len(ms) != count:
+                  print("FAIL %s: matches=%d (expected %d)" % (name, len(ms), count))
+                  sys.exit(1)
+              for m in reversed(ms):
+                  s = s[:m.start()] + fn(m) + s[m.end():]
+              print("ok", name)
+              return s
+
+
+          # ---------------- MessagesController ----------------
+          f = "messenger/MessagesController.java"
+          s = load(f)
+
+          # удалённые сообщения (обычные обновления)
+          s = patch(s, "mc-keep-deleted",
+                    r"\n([ \t]*)LongSparseArray<ArrayList<Integer>> deletedMessagesFinal = deletedMessages;",
+                    lambda m: "\n" + m.group(1) + "if (deletedMessages != null && GhostMode.keepDeleted()) {\n"
+                    + m.group(1) + "    FluxStore.markDeleted(currentAccount, deletedMessages);\n"
+                    + m.group(1) + "    deletedMessages = null;\n"
+                    + m.group(1) + "}" + m.group(0))
+
+          # удалённые сообщения (push)
+          s = patch(s, "mc-keep-deleted-push",
+                    r"protected void deleteMessagesByPush\(long dialogId, ArrayList<Integer> ids, long channelId\) \{",
+                    lambda m: m.group(0) + '''
+                  if (GhostMode.keepDeleted()) {
+                      LongSparseArray<ArrayList<Integer>> keepMap = new LongSparseArray<>();
+                      keepMap.put(channelId != 0 ? -channelId : 0, ids);
+                      FluxStore.markDeleted(currentAccount, keepMap);
+                      return;
+                  }''')
+
+          # история правок
+          s = patch(s, "mc-edit-history",
+                    r"\n([ \t]*)ImageLoader\.saveMessageThumbs\(message\);\s*\n\s*AndroidUtilities\.runOnUIThread\(\(\)-> getSendMessagesHelper\(\)\.onMessageEdited\(message\)\);",
+                    lambda m: "\n" + m.group(1) + "if (GhostMode.keepEdits()) {\n"
+                    + m.group(1) + "    try {\n"
+                    + m.group(1) + "        FluxStore.recordEdit(currentAccount, getMessagesStorage().getMessage(message.dialog_id, message.id), message);\n"
+                    + m.group(1) + "    } catch (Throwable ghostErr) {\n"
+                    + m.group(1) + "        FileLog.e(ghostErr);\n"
+                    + m.group(1) + "    }\n"
+                    + m.group(1) + "}" + m.group(0))
+
+          # реклама
+          s = patch(s, "mc-ads-sponsored",
+                    r"public SponsoredMessagesInfo getSponsoredMessages\(long dialogId\) \{",
+                    lambda m: m.group(0) + "\n        if (GhostMode.blockAds()) {\n            return null;\n        }")
+          s = patch(s, "mc-ads-promo",
+                    r"private void checkPromoInfoInternal\(boolean reset\) \{",
+                    lambda m: m.group(0) + "\n        if (GhostMode.blockAds()) {\n            return;\n        }")
+          save(f, s)
+
+          # ---------------- ChatActivity ----------------
+          f = "ui/ChatActivity.java"
+          s = load(f)
+          s = patch(s, "chat-ads",
+                    r"private void addSponsoredMessages\(boolean animated\) \{",
+                    lambda m: m.group(0) + "\n        if (GhostMode.blockAds()) {\n            return;\n        }")
+          s = patch(s, "chat-const",
+                    r"private final static int OPTION_FACT_CHECK = 106;",
+                    lambda m: m.group(0) + "\n    private final static int OPTION_FLUX_HISTORY = 9001;")
+          s = patch(s, "chat-menu",
+                    r"\n([ \t]*)MessageObject msg = selectedObjectGroup != null \? selectedObjectGroup\.findPrimaryMessageObject\(\) : selectedObject;\s*\n\s*if \(msg != null && msg\.isFactCheckable\(\)",
+                    lambda m: "\n" + m.group(1) + "if (FluxStore.hasEdits(selectedObject)) {\n"
+                    + m.group(1) + "    items.add(\"История правок\");\n"
+                    + m.group(1) + "    options.add(OPTION_FLUX_HISTORY);\n"
+                    + m.group(1) + "    icons.add(R.drawable.msg_log);\n"
+                    + m.group(1) + "}" + m.group(0))
+          s = patch(s, "chat-handler",
+                    r"\n([ \t]*)case OPTION_FACT_CHECK: \{",
+                    lambda m: "\n" + m.group(1) + "case OPTION_FLUX_HISTORY: {\n"
+                    + m.group(1) + "    FluxStore.showEditHistory(getParentActivity(), selectedObject);\n"
+                    + m.group(1) + "    break;\n"
+                    + m.group(1) + "}" + m.group(0))
+          s = patch(s, "chat-import", r"(package [^;]+;\n)",
+                    lambda m: m.group(1) + "\nimport org.telegram.messenger.GhostMode;\nimport org.telegram.messenger.FluxStore;")
+          save(f, s)
+
+          # ---------------- ChatMessageCell: пометка «удалено» ----------------
+          f = "ui/Cells/ChatMessageCell.java"
+          s = load(f)
+          s = patch(s, "cell-deleted",
+                    r"if \(currentMessageObject\.notime \|\| currentMessageObject\.isSponsored\(\) \|\| currentMessageObject\.isQuickReply\(\)\) \{\s*\n\s*timeString = \"\";",
+                    lambda m: 'if (org.telegram.messenger.FluxStore.isDeleted(currentMessageObject)) {\n'
+                    '            timeString = "удалено " + LocaleController.getInstance().getFormatterDay().format((long) (messageObject.messageOwner.date) * 1000);\n'
+                    '        } else ' + m.group(0))
+          save(f, s)
+
+          # ---------------- Боковое меню ----------------
+          f = "ui/Adapters/DrawerLayoutAdapter.java"
+          s = load(f)
+          s = patch(s, "drawer-hide",
+                    r"(items\.add\(new Item\(13, LocaleController\.getString\(\"TelegramFeatures\", R\.string\.TelegramFeatures\), helpIcon\)\);)",
+                    lambda m: m.group(1) + '''
+                  for (int i = items.size() - 1; i >= 0; i--) {
+                      Item it = items.get(i);
+                      if (it != null && org.telegram.messenger.GhostMode.hideDrawer(it.id)) {
+                          items.remove(i);
+                      }
+                  }
+                  for (int i = items.size() - 1; i >= 0; i--) {
+                      if (items.get(i) == null && (i == items.size() - 1 || (i > 0 && items.get(i - 1) == null))) {
+                          items.remove(i);
+                      }
+                  }''')
+          save(f, s)
+
+          # ---------------- TLRPC: снять запрет пересылки/копирования ----------------
+          f = "tgnet/TLRPC.java"
+          s = load(f)
+          s = patch(s, "tl-chat",
+                    r"(result\.readParams\(stream, exception, allowStrippedThumb\);)(\s*\n\s*\}\s*\n\s*return result;)",
+                    lambda m: m.group(1) + "\n                if (org.telegram.messenger.GhostMode.allowProtected()) {\n                    result.noforwards = false;\n                }" + m.group(2))
+          s = patch(s, "tl-message",
+                    r"(result\.readParams\(stream, exception\);)(\s*\n\s*if \(result\.from_id == null\) \{\s*\n\s*if \(result\.id < 0 && result\.random_id == 0\))",
+                    lambda m: m.group(1) + "\n                if (org.telegram.messenger.GhostMode.allowProtected()) {\n                    result.noforwards = false;\n                }" + m.group(2))
+          save(f, s)
+          print("flux patches applied")
+
+          java = r'''package org.telegram.messenger;
+
+          import android.content.ContentValues;
+          import android.content.Context;
+          import android.database.Cursor;
+          import android.database.sqlite.SQLiteDatabase;
+          import android.database.sqlite.SQLiteOpenHelper;
+
+          import androidx.collection.LongSparseArray;
+
+          import java.text.SimpleDateFormat;
+          import java.util.ArrayList;
+          import java.util.Date;
+          import java.util.HashSet;
+          import java.util.Locale;
+
+          import org.telegram.tgnet.TLRPC;
+          import org.telegram.ui.ActionBar.AlertDialog;
+
+          public class FluxStore extends SQLiteOpenHelper {
+
+              private static FluxStore instance;
+
+              private final HashSet<String> deleted = new HashSet<>();
+              private final HashSet<String> edited = new HashSet<>();
+              private boolean loaded;
+
+              private static synchronized FluxStore get() {
+                  if (instance == null) {
+                      instance = new FluxStore(ApplicationLoader.applicationContext);
+                  }
+                  return instance;
+              }
+
+              private FluxStore(Context context) {
+                  super(context, "fluxgram_store.db", null, 1);
+              }
+
+              @Override
+              public void onCreate(SQLiteDatabase db) {
+                  db.execSQL("CREATE TABLE IF NOT EXISTS deleted(acc INTEGER, did INTEGER, mid INTEGER, PRIMARY KEY(acc, did, mid))");
+                  db.execSQL("CREATE TABLE IF NOT EXISTS edits(acc INTEGER, did INTEGER, mid INTEGER, edit_date INTEGER, text TEXT)");
+              }
+
+              @Override
+              public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+              }
+
+              private static String key(int acc, long did, int mid) {
+                  return acc + ":" + did + ":" + mid;
+              }
+
+              private static long dialogKey(TLRPC.Message m) {
+                  if (m != null && m.peer_id != null && m.peer_id.channel_id != 0) {
+                      return -m.peer_id.channel_id;
+                  }
+                  return 0;
+              }
+
+              private synchronized void ensureLoaded() {
+                  if (loaded) {
+                      return;
+                  }
+                  loaded = true;
+                  try {
+                      SQLiteDatabase db = getReadableDatabase();
+                      Cursor c = db.rawQuery("SELECT acc, did, mid FROM deleted", null);
+                      while (c.moveToNext()) {
+                          deleted.add(key(c.getInt(0), c.getLong(1), c.getInt(2)));
+                      }
+                      c.close();
+                      c = db.rawQuery("SELECT DISTINCT acc, did, mid FROM edits", null);
+                      while (c.moveToNext()) {
+                          edited.add(key(c.getInt(0), c.getLong(1), c.getInt(2)));
+                      }
+                      c.close();
+                  } catch (Throwable t) {
+                      FileLog.e(t);
+                  }
+              }
+
+              // ---------- удалённые сообщения ----------
+
+              public static void markDeleted(final int acc, LongSparseArray<ArrayList<Integer>> map) {
+                  if (map == null) {
+                      return;
+                  }
+                  final FluxStore s = get();
+                  s.ensureLoaded();
+                  final ArrayList<long[]> rows = new ArrayList<>();
+                  for (int a = 0; a < map.size(); a++) {
+                      long did = map.keyAt(a);
+                      ArrayList<Integer> ids = map.valueAt(a);
+                      if (ids == null) {
+                          continue;
+                      }
+                      for (int b = 0; b < ids.size(); b++) {
+                          int mid = ids.get(b);
+                          if (mid <= 0) {
+                              continue;
+                          }
+                          rows.add(new long[]{did, mid});
+                          synchronized (s) {
+                              s.deleted.add(key(acc, did, mid));
+                          }
+                      }
+                  }
+                  Utilities.globalQueue.postRunnable(() -> {
+                      try {
+                          SQLiteDatabase db = s.getWritableDatabase();
+                          db.beginTransaction();
+                          try {
+                              for (int i = 0; i < rows.size(); i++) {
+                                  ContentValues v = new ContentValues();
+                                  v.put("acc", acc);
+                                  v.put("did", rows.get(i)[0]);
+                                  v.put("mid", rows.get(i)[1]);
+                                  db.insertWithOnConflict("deleted", null, v, SQLiteDatabase.CONFLICT_IGNORE);
+                              }
+                              db.setTransactionSuccessful();
+                          } finally {
+                              db.endTransaction();
+                          }
+                      } catch (Throwable t) {
+                          FileLog.e(t);
+                      }
+                  });
+              }
+
+              public static boolean isDeleted(MessageObject obj) {
+                  if (obj == null || obj.messageOwner == null || obj.getId() <= 0) {
+                      return false;
+                  }
+                  FluxStore s = get();
+                  s.ensureLoaded();
+                  synchronized (s) {
+                      return s.deleted.contains(key(obj.currentAccount, dialogKey(obj.messageOwner), obj.getId()));
+                  }
+              }
+
+              // ---------- история правок ----------
+
+              public static void recordEdit(final int acc, TLRPC.Message oldMsg, TLRPC.Message newMsg) {
+                  if (oldMsg == null || newMsg == null || oldMsg.message == null || oldMsg.message.equals(newMsg.message)) {
+                      return;
+                  }
+                  final FluxStore s = get();
+                  s.ensureLoaded();
+                  final long did = dialogKey(newMsg);
+                  final int mid = newMsg.id;
+                  final int date = oldMsg.edit_date != 0 ? oldMsg.edit_date : oldMsg.date;
+                  final String text = oldMsg.message;
+                  synchronized (s) {
+                      s.edited.add(key(acc, did, mid));
+                  }
+                  Utilities.globalQueue.postRunnable(() -> {
+                      try {
+                          ContentValues v = new ContentValues();
+                          v.put("acc", acc);
+                          v.put("did", did);
+                          v.put("mid", mid);
+                          v.put("edit_date", date);
+                          v.put("text", text);
+                          s.getWritableDatabase().insert("edits", null, v);
+                      } catch (Throwable t) {
+                          FileLog.e(t);
+                      }
+                  });
+              }
+
+              public static boolean hasEdits(MessageObject obj) {
+                  if (obj == null || obj.messageOwner == null || obj.getId() <= 0) {
+                      return false;
+                  }
+                  FluxStore s = get();
+                  s.ensureLoaded();
+                  synchronized (s) {
+                      return s.edited.contains(key(obj.currentAccount, dialogKey(obj.messageOwner), obj.getId()));
+                  }
+              }
+
+              public static void showEditHistory(Context context, MessageObject obj) {
+                  if (context == null || obj == null) {
+                      return;
+                  }
+                  StringBuilder sb = new StringBuilder();
+                  SimpleDateFormat fmt = new SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.getDefault());
+                  try {
+                      Cursor c = get().getReadableDatabase().rawQuery(
+                              "SELECT edit_date, text FROM edits WHERE acc = ? AND did = ? AND mid = ? ORDER BY rowid DESC",
+                              new String[]{String.valueOf(obj.currentAccount), String.valueOf(dialogKey(obj.messageOwner)), String.valueOf(obj.getId())});
+                      sb.append("Сейчас:\n").append(obj.messageOwner.message == null ? "" : obj.messageOwner.message);
+                      while (c.moveToNext()) {
+                          sb.append("\n\n").append(fmt.format(new Date(c.getLong(0) * 1000L))).append(":\n").append(c.getString(1));
+                      }
+                      c.close();
+                  } catch (Throwable t) {
+                      FileLog.e(t);
+                  }
+                  AlertDialog.Builder builder = new AlertDialog.Builder(context);
+                  builder.setTitle("История правок");
+                  builder.setMessage(sb.toString());
+                  builder.setPositiveButton("OK", null);
+                  builder.show();
+              }
+          }
+          '''
+          open(J + "messenger/FluxStore.java", "w", encoding="utf-8").write(java)
+          print("FluxStore.java written")
+          PY
+
+      - name: Material You 3 (dynamic color, M3 shapes)
+        run: |
+          python3 - <<'PY'
+          import re
+
+          J = "TMessagesProj/src/main/java/org/telegram/"
+
+
+          def soft(name, path, pat, fn, count=1):
+              # мягкий патч: если якорь не найден, сборка НЕ падает, просто пропускаем
+              try:
+                  s = open(J + path, encoding="utf-8").read()
+              except Exception as e:
+                  print("WARN %s: no file (%s)" % (name, e))
+                  return
+              ms = list(re.finditer(pat, s))
+              if len(ms) != count:
+                  print("WARN %s: matches=%d (expected %d), skipped" % (name, len(ms), count))
+                  return
+              for m in reversed(ms):
+                  s = s[:m.start()] + fn(m) + s[m.end():]
+              open(J + path, "w", encoding="utf-8").write(s)
+              print("ok", name)
+
+
+          java = r'''package org.telegram.messenger;
+
+          import android.content.Context;
+          import android.os.Build;
+
+          import java.util.HashMap;
+
+          import org.telegram.ui.ActionBar.Theme;
+
+          public class FluxMaterialYou {
+
+              public static final String KEY = "m3_dynamic";
+
+              private static volatile HashMap<Integer, Integer> colors = new HashMap<>();
+              private static volatile int builtFor = -1;
+              private static volatile Object builtTheme;
+              private static volatile int enabledState = -1;
+
+              public static boolean pref() {
+                  try {
+                      return ApplicationLoader.applicationContext
+                              .getSharedPreferences("fluxgram", Context.MODE_PRIVATE)
+                              .getBoolean(KEY, true);
+                  } catch (Throwable t) {
+                      return false;
+                  }
+              }
+
+              public static void refresh() {
+                  enabledState = -1;
+                  builtFor = -1;
+              }
+
+              private static boolean enabled() {
+                  if (enabledState == -1) {
+                      enabledState = (Build.VERSION.SDK_INT >= 31 && pref()) ? 1 : 0;
+                  }
+                  return enabledState == 1;
+              }
+
+              public static Integer override(int key) {
+                  try {
+                      if (!enabled()) {
+                          return null;
+                      }
+                      Object theme = Theme.getCurrentTheme();
+                      boolean dark = Theme.isCurrentThemeDark();
+                      int want = dark ? 2 : 1;
+                      if (want != builtFor || theme != builtTheme) {
+                          build(dark, theme);
+                      }
+                      return colors.get(key);
+                  } catch (Throwable t) {
+                      return null;
+                  }
+              }
+
+              private static boolean isBuiltIn(Object theme) {
+                  try {
+                      if (theme == null) {
+                          return false;
+                      }
+                      Object path = theme.getClass().getField("pathToFile").get(theme);
+                      Object asset = theme.getClass().getField("assetName").get(theme);
+                      return path == null && asset == null;
+                  } catch (Throwable t) {
+                      return true;
+                  }
+              }
+
+              private static int c(String n) {
+                  Context ctx = ApplicationLoader.applicationContext;
+                  int id = ctx.getResources().getIdentifier("system_" + n, "color", "android");
+                  return id != 0 ? ctx.getResources().getColor(id, null) : 0;
+              }
+
+              private static int a(int color, int alpha) {
+                  return (color & 0x00FFFFFF) | (alpha << 24);
+              }
+
+              private static void put(HashMap<Integer, Integer> m, int color, String... names) {
+                  for (String n : names) {
+                      try {
+                          m.put(Theme.class.getField("key_" + n).getInt(null), color);
+                      } catch (Throwable ignore) {
+                      }
+                  }
+              }
+
+              private static synchronized void build(boolean dark, Object theme) {
+                  HashMap<Integer, Integer> m = new HashMap<>();
+                  if (isBuiltIn(theme) && c("accent1_600") != 0) {
+                      int primary = dark ? c("accent1_200") : c("accent1_600");
+                      int onPrimary = dark ? c("accent1_800") : c("accent1_0");
+                      int pc = dark ? c("accent1_700") : c("accent1_100");
+                      int pcSel = dark ? c("accent1_600") : c("accent1_200");
+                      int onPc = dark ? c("accent1_100") : c("accent1_900");
+                      int onPcVar = dark ? c("accent1_200") : c("accent1_700");
+                      int surface = dark ? c("neutral1_900") : c("neutral1_10");
+                      int surfLow = dark ? c("neutral1_1000") : c("neutral1_50");
+                      int surfHigh = dark ? c("neutral1_800") : c("neutral1_100");
+                      int surfSel = dark ? c("neutral1_700") : c("neutral1_200");
+                      int dialogBg = dark ? c("neutral1_800") : c("neutral1_50");
+                      int onSurface = dark ? c("neutral1_100") : c("neutral1_900");
+                      int onSurfVar = dark ? c("neutral2_200") : c("neutral2_700");
+                      int outlineVar = dark ? c("neutral2_700") : c("neutral2_200");
+
+                      // поверхности
+                      put(m, surface, "windowBackgroundWhite", "actionBarDefault", "chat_emojiPanelBackground");
+                      put(m, surfLow, "windowBackgroundGray", "dialogBackgroundGray");
+                      put(m, dialogBg, "dialogBackground");
+                      put(m, surfHigh, "chat_messagePanelBackground");
+                      put(m, a(outlineVar, 0xCC), "divider");
+
+                      // текст и иконки на поверхностях
+                      put(m, onSurface, "windowBackgroundWhiteBlackText", "actionBarDefaultTitle", "actionBarDefaultIcon",
+                              "actionBarDefaultSearch", "chats_name", "dialogTextBlack", "chat_messagePanelText", "chat_messageTextIn");
+                      put(m, a(onSurface, 0x1F), "actionBarDefaultSelector");
+                      put(m, onSurfVar, "windowBackgroundWhiteGrayText", "windowBackgroundWhiteGrayText2",
+                              "windowBackgroundWhiteGrayText3", "windowBackgroundWhiteGrayText4", "windowBackgroundWhiteGrayText5",
+                              "windowBackgroundWhiteGrayText6", "windowBackgroundWhiteGrayText7", "windowBackgroundWhiteGrayText8",
+                              "windowBackgroundWhiteGrayIcon", "actionBarDefaultSubtitle", "actionBarDefaultSearchPlaceholder",
+                              "chats_message", "chats_date", "chats_pinnedIcon", "dialogTextGray", "dialogTextGray2",
+                              "dialogTextGray3", "dialogTextGray4", "dialogIcon", "chat_messagePanelHint", "chat_messagePanelIcons",
+                              "chat_inTimeText", "chat_inViews", "chat_inReplyMessageText", "chat_inFileInfoText");
+
+                      // акцент (primary)
+                      put(m, primary, "windowBackgroundWhiteBlueText", "windowBackgroundWhiteBlueText2",
+                              "windowBackgroundWhiteBlueText3", "windowBackgroundWhiteBlueText4", "windowBackgroundWhiteBlueText5",
+                              "windowBackgroundWhiteBlueText6", "windowBackgroundWhiteBlueText7", "windowBackgroundWhiteBlueHeader",
+                              "windowBackgroundWhiteBlueButton", "windowBackgroundWhiteBlueIcon", "windowBackgroundWhiteLinkText",
+                              "chats_unreadCounter", "switchTrackChecked", "switchTrackBlueChecked", "switch2TrackChecked",
+                              "checkbox", "radioBackgroundChecked", "dialogTextBlue", "dialogTextBlue2", "dialogTextBlue3",
+                              "dialogTextBlue4", "dialogButton", "dialogTextLink", "dialogRadioBackgroundChecked",
+                              "dialogCheckboxSquareBackground", "progressCircle", "featuredStickers_addButton",
+                              "chat_messagePanelSend", "chat_messagePanelCursor", "chat_inReplyLine", "chat_inReplyNameText",
+                              "chat_inSiteNameText", "chat_messageLinkIn", "chat_fieldOverlayText", "actionBarTabLine",
+                              "actionBarTabActiveText");
+                      put(m, onPrimary, "chats_unreadCounterText", "featuredStickers_buttonText", "checkboxCheck");
+
+                      // кнопка «Новый чат» (FAB) — primary container
+                      put(m, pc, "chats_actionBackground", "chats_actionPressedBackground");
+                      put(m, onPc, "chats_actionIcon");
+
+                      // пузыри сообщений
+                      put(m, pc, "chat_outBubble", "chat_outBubbleGradient", "chat_outBubbleGradient2", "chat_outBubbleGradient3");
+                      put(m, pcSel, "chat_outBubbleSelected");
+                      put(m, onPc, "chat_messageTextOut", "chat_messageLinkOut", "chat_outReplyNameText", "chat_outSiteNameText",
+                              "chat_outForwardedNameText", "chat_outViaBotNameText", "chat_outAudioTitleText", "chat_outFileNameText");
+                      put(m, onPcVar, "chat_outTimeText", "chat_outViews", "chat_outSentCheck", "chat_outSentCheckRead",
+                              "chat_outSentCheckSelected", "chat_outSentCheckReadSelected", "chat_outReplyLine",
+                              "chat_outReplyMessageText", "chat_outAudioPerfomerText", "chat_outAudioPerformerText",
+                              "chat_outFileInfoText", "chat_outLoader", "chat_outMenu", "chat_outInstant");
+                      put(m, surfHigh, "chat_inBubble");
+                      put(m, surfSel, "chat_inBubbleSelected");
+                  }
+                  colors = m;
+                  builtTheme = theme;
+                  builtFor = dark ? 2 : 1;
+              }
+          }
+          '''
+          open(J + "messenger/FluxMaterialYou.java", "w", encoding="utf-8").write(java)
+          print("FluxMaterialYou.java written")
+
+          # 1. хук в Theme.getColor: подменяем цвета на динамические
+          soft("theme-hook", "ui/ActionBar/Theme.java",
+               r"public static int getColor\(int key, boolean\[\] isDefault, boolean ignoreAnimation\) \{",
+               lambda m: m.group(0) + "\n        Integer fluxM3 = org.telegram.messenger.FluxMaterialYou.override(key);"
+               "\n        if (fluxM3 != null) {\n            if (isDefault != null) {\n                isDefault[0] = false;\n            }"
+               "\n            return fluxM3;\n        }")
+
+          # 2. M3-скругления: радиус пузырей по умолчанию 22 (у M3 крупные скругления)
+          soft("bubble-radius", "messenger/SharedConfig.java",
+               r'(getInt\("bubbleRadius",\s*)\d+(\))',
+               lambda m: m.group(1) + "22" + m.group(2), count=1)
+          soft("bubble-radius-default", "messenger/SharedConfig.java",
+               r"public static int bubbleRadius = \d+;",
+               lambda m: "public static int bubbleRadius = 22;")
+
+          # 3. переключатель в FluxGram -> Внешний вид
+          soft("settings-toggle", "ui/FluxSettingsActivity.java",
+               r'addInfo\(list, context, "Изменения применяются при следующем открытии чата\."\);',
+               lambda m: 'addToggle(list, context, "Material You: цвета из обоев", org.telegram.messenger.FluxMaterialYou.KEY, '
+               'org.telegram.messenger.FluxMaterialYou.pref(), false, false);\n'
+               '                  addInfo(list, context, "Палитра Material 3 из ваших обоев (Android 12+). Применяется после перезапуска FluxGram.");\n'
+               '                  ' + m.group(0))
+          PY
+
+      - name: Android SDK licenses and packages
+        run: |
+          set +o pipefail
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-34" "build-tools;34.0.0" "cmake;3.22.1"
+          NDK=$(grep -rhoE 'ndkVersion[ =]+"[0-9.]+"' --include=build.gradle . | head -1 | grep -oE '[0-9.]+' | head -1)
+          [ -n "$NDK" ] && "$SDKM" "ndk;$NDK" || true
+
+      - name: Create API_KEYS
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_HASH: ${{ secrets.APP_HASH }}
+        run: |
+          printf 'APP_ID = %s\nAPP_HASH = %s\n' "${APP_ID:-12345}" "${APP_HASH:-aaaaaaaabbbbbbccccccfffffff001122}" > API_KEYS
+
+      - name: Build native libraries (libvpx, ffmpeg, boringssl)
+        run: |
+          export NDK=$(ls -d "$ANDROID_HOME"/ndk/* | sort -V | head -1)
+          export NINJA_PATH=$(which ninja)
+          cd TMessagesProj/jni
+          chmod +x *.sh
+          ./build_libvpx_clang.sh
+          ./build_ffmpeg_clang.sh
+          ./patch_ffmpeg.sh
+          ./patch_boringssl.sh
+          ./build_boringssl.sh
+
+      - name: Build APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleAfatRelease --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FluxGram-apk
+          path: "**/build/outputs/apk/**/*.apk"
