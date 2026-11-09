@@ -278,11 +278,34 @@ jobs:
             exit 1
           fi
 
+      - name: Zipalign + подпись APK (v1+v2+v3) и проверка
+        run: |
+          set -e
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)"
+          BT="${BT%/}"
+          echo "build-tools: $BT"
+          KS="$GITHUB_WORKSPACE/TMessagesProj/config/release.keystore"
+          mkdir -p signed
+          for f in out/*.apk; do
+            n="$(basename "$f" .apk)"
+            "$BT/zipalign" -p -f 4 "$f" "signed/$n-aligned.apk"
+            "$BT/apksigner" sign \
+              --ks "$KS" --ks-key-alias "$KS_ALIAS" \
+              --ks-pass "pass:$KS_STORE_PASS" --key-pass "pass:$KS_KEY_PASS" \
+              --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+              --out "signed/$n.apk" "signed/$n-aligned.apk"
+            rm -f "signed/$n-aligned.apk" "signed/$n.apk.idsig"
+            "$BT/zipalign" -c -P 16 4 "signed/$n.apk" && echo "aligned OK: $n" || "$BT/zipalign" -c 4 "signed/$n.apk"
+            "$BT/apksigner" verify -v --print-certs "signed/$n.apk" | head -12
+            "$BT/aapt2" dump badging "signed/$n.apk" | grep -E "^package:|sdkVersion|targetSdk|native-code" || true
+          done
+          ls -lh signed
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: apk
-          path: out/*.apk
+          path: signed/*.apk
           if-no-files-found: error
 
       - name: Upload logs
