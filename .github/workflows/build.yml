@@ -28,6 +28,14 @@ on:
         description: "Призрак: не показывать «в сети»"
         type: boolean
         default: true
+      ghost_stories:
+        description: "Призрак: не отмечать истории просмотренными"
+        type: boolean
+        default: true
+      ghost_offline:
+        description: "Призрак: автоматический «офлайн» после отправки сообщения"
+        type: boolean
+        default: false
 
 env:
   APP_NAME: FluxGram
@@ -37,6 +45,8 @@ env:
   GHOST_READ: ${{ inputs.ghost_read }}
   GHOST_TYPING: ${{ inputs.ghost_typing }}
   GHOST_ONLINE: ${{ inputs.ghost_online }}
+  GHOST_STORIES: ${{ inputs.ghost_stories }}
+  GHOST_OFFLINE: ${{ inputs.ghost_offline }}
 
 defaults:
   run:
@@ -177,10 +187,15 @@ jobs:
           python3 - <<'PY'
           import re, os, sys
 
-          READ   = os.environ.get("GHOST_READ", "true") == "true"
-          TYPING = os.environ.get("GHOST_TYPING", "true") == "true"
-          ONLINE = os.environ.get("GHOST_ONLINE", "true") == "true"
-          print("ghost defaults: read=%s typing=%s online=%s" % (READ, TYPING, ONLINE))
+          def flag(name, default):
+              return os.environ.get(name, default) == "true"
+
+          READ = flag("GHOST_READ", "true")
+          TYPING = flag("GHOST_TYPING", "true")
+          ONLINE = flag("GHOST_ONLINE", "true")
+          STORIES = flag("GHOST_STORIES", "true")
+          OFFLINE = flag("GHOST_OFFLINE", "false")
+          print("ghost defaults: read=%s stories=%s online=%s typing=%s offline=%s" % (READ, STORIES, ONLINE, TYPING, OFFLINE))
 
           tg = "TMessagesProj/src/main/java/org/telegram/tgnet"
           tlrpc = open(tg + "/TLRPC.java", encoding="utf-8").read()
@@ -190,28 +205,82 @@ jobs:
               print(("  найден    " if ok else "  НЕ найден ") + name)
               return ok
 
-          checks = []
-          for n in ("TL_messages_readHistory", "TL_channels_readHistory",
-                    "TL_messages_readMessageContents", "TL_channels_readMessageContents"):
+          cases = []
+          offline_impl = "private static void sendOffline() { }"
+
+          # --- чтение сообщений: запрос не уходит, но запоминается (для «Читать при действиях»)
+          if has("TL_messages_readHistory"):
+              cases.append('if (req instanceof TLRPC.TL_messages_readHistory) { if (on(KEY_READ)) { remember(peerKey(((TLRPC.TL_messages_readHistory) req).peer), req); return true; } return false; }')
+          if has("TL_channels_readHistory"):
+              cases.append('if (req instanceof TLRPC.TL_channels_readHistory) { if (on(KEY_READ)) { TLRPC.InputChannel ch = ((TLRPC.TL_channels_readHistory) req).channel; remember(ch == null ? null : "c" + ch.channel_id, req); return true; } return false; }')
+          for n in ("TL_messages_readMessageContents", "TL_channels_readMessageContents"):
               if has(n):
-                  checks.append("if (req instanceof TLRPC.%s) return get(KEY_READ);" % n)
+                  cases.append('if (req instanceof TLRPC.%s) return on(KEY_READ);' % n)
+
+          # --- истории
+          for n in ("TL_stories_readStories", "TL_stories_incrementStoryViews"):
+              if has(n):
+                  cases.append('if (req instanceof TLRPC.%s) return on(KEY_STORIES);' % n)
+
+          # --- «печатает»
           if has("TL_messages_setTyping"):
-              checks.append("if (req instanceof TLRPC.TL_messages_setTyping) return get(KEY_TYPING);")
+              cases.append('if (req instanceof TLRPC.TL_messages_setTyping) return on(KEY_TYPING);')
+
+          # --- «онлайн»
           if has("TL_account_updateStatus"):
-              checks.append("if (req instanceof TLRPC.TL_account_updateStatus) { if (get(KEY_ONLINE)) { ((TLRPC.TL_account_updateStatus) req).offline = true; } return false; }")
+              cases.append('if (req instanceof TLRPC.TL_account_updateStatus) { if (on(KEY_ONLINE)) { ((TLRPC.TL_account_updateStatus) req).offline = true; } return false; }')
+              offline_impl = """private static void sendOffline() {
+                  AndroidUtilities.runOnUIThread(new Runnable() {
+                      @Override
+                      public void run() {
+                          TLRPC.TL_account_updateStatus r = new TLRPC.TL_account_updateStatus();
+                          r.offline = true;
+                          ConnectionsManager.getInstance(UserConfig.selectedAccount).sendRequest(r, new RequestDelegate() {
+                              @Override
+                              public void run(TLObject response, TLRPC.TL_error error) { }
+                          });
+                      }
+                  }, 1500);
+              }"""
+
+          # --- отправка сообщений / реакции: «читать при действиях», «офлайн», «без звука»
+          sends = [("TL_messages_sendMessage", "peer", True),
+                   ("TL_messages_sendMedia", "peer", True),
+                   ("TL_messages_sendMultiMedia", "peer", True),
+                   ("TL_messages_forwardMessages", "to_peer", True),
+                   ("TL_messages_sendReaction", "peer", False)]
+          for n, field, silent in sends:
+              if has(n):
+                  body = 'TLRPC.%s r = (TLRPC.%s) req; onAction(peerKey(r.%s));' % (n, n, field)
+                  if silent:
+                      body += ' if (get(KEY_SILENT)) { r.silent = true; }'
+                  cases.append('if (req instanceof TLRPC.%s) { %s return false; }' % (n, body))
 
           java = """package org.telegram.messenger;
 
           import android.content.Context;
           import android.content.SharedPreferences;
 
+          import org.telegram.tgnet.ConnectionsManager;
+          import org.telegram.tgnet.RequestDelegate;
           import org.telegram.tgnet.TLObject;
           import org.telegram.tgnet.TLRPC;
 
+          import java.util.concurrent.ConcurrentHashMap;
+
           public class GhostMode {
+              public static final String KEY_GHOST = "ghost_enabled";
               public static final String KEY_READ = "ghost_read";
-              public static final String KEY_TYPING = "ghost_typing";
+              public static final String KEY_STORIES = "ghost_stories";
               public static final String KEY_ONLINE = "ghost_online";
+              public static final String KEY_TYPING = "ghost_typing";
+              public static final String KEY_OFFLINE = "ghost_offline";
+              public static final String KEY_ACTION_READ = "ghost_read_on_action";
+              public static final String KEY_SILENT = "send_silent";
+
+              // последний «прочитано» по каждому чату, который мы не отправили
+              private static final ConcurrentHashMap<String, TLObject> PENDING = new ConcurrentHashMap<>();
+              private static final ThreadLocal<Boolean> BYPASS = new ThreadLocal<>();
 
               private static SharedPreferences prefs() {
                   Context c = ApplicationLoader.applicationContext;
@@ -219,9 +288,12 @@ jobs:
               }
 
               private static boolean def(String key) {
+                  if (KEY_GHOST.equals(key)) return true;
                   if (KEY_READ.equals(key)) return @READ@;
-                  if (KEY_TYPING.equals(key)) return @TYPING@;
+                  if (KEY_STORIES.equals(key)) return @STORIES@;
                   if (KEY_ONLINE.equals(key)) return @ONLINE@;
+                  if (KEY_TYPING.equals(key)) return @TYPING@;
+                  if (KEY_OFFLINE.equals(key)) return @OFFLINE@;
                   return false;
               }
 
@@ -237,18 +309,62 @@ jobs:
                   }
               }
 
+              /** функция работает, если включён общий режим призрака и сам пункт */
+              private static boolean on(String key) {
+                  return get(KEY_GHOST) && get(key);
+              }
+
+              private static String peerKey(TLRPC.InputPeer p) {
+                  if (p == null) return null;
+                  if (p.channel_id != 0) return "c" + p.channel_id;
+                  if (p.chat_id != 0) return "g" + p.chat_id;
+                  return "u" + p.user_id;
+              }
+
+              private static void remember(String key, TLObject req) {
+                  if (key != null) {
+                      PENDING.put(key, req);
+                  }
+              }
+
+              private static void onAction(String key) {
+                  if (key != null && get(KEY_ACTION_READ)) {
+                      TLObject pending = PENDING.remove(key);
+                      if (pending != null) {
+                          BYPASS.set(Boolean.TRUE);
+                          try {
+                              ConnectionsManager.getInstance(UserConfig.selectedAccount).sendRequest(pending, new RequestDelegate() {
+                                  @Override
+                                  public void run(TLObject response, TLRPC.TL_error error) { }
+                              });
+                          } finally {
+                              BYPASS.set(Boolean.FALSE);
+                          }
+                      }
+                  }
+                  if (on(KEY_OFFLINE)) {
+                      sendOffline();
+                  }
+              }
+
+              @OFFLINE_IMPL@
+
               /** true = запрос не отправлять на сервер */
               public static boolean drop(TLObject req) {
                   if (req == null) return false;
+                  if (Boolean.TRUE.equals(BYPASS.get())) return false;
                   @CHECKS@
                   return false;
               }
           }
           """
           java = (java.replace("@READ@", str(READ).lower())
-                      .replace("@TYPING@", str(TYPING).lower())
+                      .replace("@STORIES@", str(STORIES).lower())
                       .replace("@ONLINE@", str(ONLINE).lower())
-                      .replace("@CHECKS@", "\n        ".join(checks)))
+                      .replace("@TYPING@", str(TYPING).lower())
+                      .replace("@OFFLINE@", str(OFFLINE).lower())
+                      .replace("@OFFLINE_IMPL@", offline_impl)
+                      .replace("@CHECKS@", "\n        ".join(cases)))
           open("TMessagesProj/src/main/java/org/telegram/messenger/GhostMode.java", "w", encoding="utf-8").write(java)
 
           cm = tg + "/ConnectionsManager.java"
@@ -273,12 +389,12 @@ jobs:
           echo "--- хуки ---"
           grep -n "GhostMode" TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
 
-      - name: Пункт «Настройки Ghost» в настройках приложения
+      - name: Пункт «FluxGram» в настройках приложения
         run: |
           python3 - <<'PY'
           import re, os, glob
 
-          # Пункт «Настройки Ghost» в настройках приложения (мягкий патч:
+          # Пункт «FluxGram» в настройках приложения (мягкий патч:
           # если что-то не нашлось — пункт не добавляется, сборка продолжается).
           base = "TMessagesProj/src/main/java/org/telegram/ui"
           sa_path = base + "/SettingsActivity.java"
@@ -290,7 +406,7 @@ jobs:
                   open(summary, "a", encoding="utf-8").write(msg + "\n\n")
 
           def bail(why):
-              report("⚠️ Пункт «Настройки Ghost» НЕ добавлен: " + why + " (призрак по build-флагам работает)")
+              report("⚠️ Пункт «FluxGram» НЕ добавлен: " + why + " (призрак по build-флагам работает)")
               raise SystemExit(0)
 
           if not os.path.exists(sa_path):
@@ -304,7 +420,7 @@ jobs:
               if not os.path.exists(f):
                   bail("нет файла " + f)
           theme = open(base + "/ActionBar/Theme.java", encoding="utf-8").read()
-          if "key_windowBackgroundGray" not in theme or "key_windowBackgroundWhite" not in theme:
+          if "key_windowBackgroundGray" not in theme or "key_windowBackgroundWhite" not in theme or "key_windowBackgroundWhiteGrayText4" not in theme:
               bail("нет ключей темы")
           ab = open(base + "/ActionBar/ActionBar.java", encoding="utf-8").read()
           if "ActionBarMenuOnItemClick" not in ab or "setAllowOverlayTitle" not in ab:
@@ -339,7 +455,9 @@ jobs:
           import android.widget.FrameLayout;
           import android.widget.LinearLayout;
           import android.widget.ScrollView;
+          import android.widget.TextView;
 
+          import org.telegram.messenger.AndroidUtilities;
           import org.telegram.messenger.GhostMode;
           import org.telegram.messenger.R;
           import org.telegram.ui.ActionBar.ActionBar;
@@ -348,13 +466,27 @@ jobs:
           import org.telegram.ui.Cells.HeaderCell;
           import org.telegram.ui.Cells.TextCheckCell;
 
+          import java.util.ArrayList;
+
           public class GhostSettingsActivity extends BaseFragment {
+
+              private static final String[] SUB_KEYS = {
+                      GhostMode.KEY_READ, GhostMode.KEY_STORIES, GhostMode.KEY_ONLINE,
+                      GhostMode.KEY_TYPING, GhostMode.KEY_OFFLINE
+              };
+              private static final String[] SUB_TITLES = {
+                      "Не читать сообщения", "Не читать истории", "Не отправлять «онлайн»",
+                      "Не отправлять «печатает»", "Автоматический «офлайн»"
+              };
+
+              private TextCheckCell master;
+              private final ArrayList<TextCheckCell> subCells = new ArrayList<>();
 
               @Override
               public View createView(Context context) {
                   actionBar.setBackButtonImage(R.drawable.ic_ab_back);
                   actionBar.setAllowOverlayTitle(true);
-                  actionBar.setTitle("Настройки Ghost");
+                  actionBar.setTitle("FluxGram");
                   actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
                       @Override
                       public void onItemClick(int id) {
@@ -375,38 +507,99 @@ jobs:
                   list.setOrientation(LinearLayout.VERTICAL);
                   scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-                  HeaderCell header = new HeaderCell(context);
-                  header.setText("Режим призрака");
-                  header.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-                  list.addView(header, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                  addHeader(list, context, "Режим призрака");
 
-                  addSwitch(list, context, "Не отмечать сообщения прочитанными", GhostMode.KEY_READ, true);
-                  addSwitch(list, context, "Не показывать «печатает…»", GhostMode.KEY_TYPING, true);
-                  addSwitch(list, context, "Скрывать статус «в сети»", GhostMode.KEY_ONLINE, false);
+                  master = newCell(context);
+                  master.setOnClickListener(v -> {
+                      boolean value = !GhostMode.get(GhostMode.KEY_GHOST);
+                      GhostMode.set(GhostMode.KEY_GHOST, value);
+                      for (String k : SUB_KEYS) {
+                          GhostMode.set(k, value);
+                      }
+                      refresh();
+                  });
+                  list.addView(master, matchWrap());
 
+                  for (int i = 0; i < SUB_KEYS.length; i++) {
+                      final String key = SUB_KEYS[i];
+                      TextCheckCell cell = newCell(context);
+                      cell.setTextAndCheck(SUB_TITLES[i], GhostMode.get(key), i < SUB_KEYS.length - 1);
+                      cell.setOnClickListener(v -> {
+                          GhostMode.set(key, !GhostMode.get(key));
+                          int n = 0;
+                          for (String k : SUB_KEYS) {
+                              if (GhostMode.get(k)) n++;
+                          }
+                          GhostMode.set(GhostMode.KEY_GHOST, n > 0);
+                          refresh();
+                      });
+                      subCells.add(cell);
+                      list.addView(cell, matchWrap());
+                  }
+                  addNote(list, context, "Режим призрака включает или выключает все пункты сразу. Каждый пункт можно настроить отдельно.");
+
+                  addSwitch(list, context, "Читать при действиях", GhostMode.KEY_ACTION_READ);
+                  addNote(list, context, "Читает чат, когда вы отправляете сообщение или ставите реакцию.");
+
+                  addSwitch(list, context, "Отправлять без звука", GhostMode.KEY_SILENT);
+                  addNote(list, context, "Все сообщения по умолчанию отправляются без звука.");
+
+                  refresh();
                   return fragmentView;
               }
 
-              private void addSwitch(LinearLayout list, Context context, String title, final String key, boolean divider) {
+              private void refresh() {
+                  int n = 0;
+                  for (int i = 0; i < SUB_KEYS.length; i++) {
+                      boolean v = GhostMode.get(SUB_KEYS[i]);
+                      if (v) n++;
+                      subCells.get(i).setChecked(v);
+                  }
+                  master.setTextAndCheck("Режим призрака  " + n + "/" + SUB_KEYS.length, GhostMode.get(GhostMode.KEY_GHOST), true);
+              }
+
+              private LinearLayout.LayoutParams matchWrap() {
+                  return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+              }
+
+              private TextCheckCell newCell(Context context) {
                   TextCheckCell cell = new TextCheckCell(context);
                   cell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-                  cell.setTextAndCheck(title, GhostMode.get(key), divider);
-                  cell.setOnClickListener(new View.OnClickListener() {
-                      @Override
-                      public void onClick(View v) {
-                          boolean value = !GhostMode.get(key);
-                          GhostMode.set(key, value);
-                          ((TextCheckCell) v).setChecked(value);
-                      }
+                  return cell;
+              }
+
+              private void addHeader(LinearLayout list, Context context, String title) {
+                  HeaderCell header = new HeaderCell(context);
+                  header.setText(title);
+                  header.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  list.addView(header, matchWrap());
+              }
+
+              private void addSwitch(LinearLayout list, Context context, String title, final String key) {
+                  final TextCheckCell cell = newCell(context);
+                  cell.setTextAndCheck(title, GhostMode.get(key), false);
+                  cell.setOnClickListener(v -> {
+                      boolean value = !GhostMode.get(key);
+                      GhostMode.set(key, value);
+                      cell.setChecked(value);
                   });
-                  list.addView(cell, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                  list.addView(cell, matchWrap());
+              }
+
+              private void addNote(LinearLayout list, Context context, String text) {
+                  TextView note = new TextView(context);
+                  note.setText(text);
+                  note.setTextSize(14);
+                  note.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+                  note.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(10), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
+                  list.addView(note, matchWrap());
               }
           }
           """
 
           # --- патч SettingsActivity ---
           orig = open(sa_path, encoding="utf-8").read()
-          TITLE = "Настройки Ghost"
+          TITLE = "FluxGram"
 
           def try_patch(X):
               s = orig
