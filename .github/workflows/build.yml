@@ -1858,19 +1858,6 @@ jobs:
           print("✅ Канал FluxGram добавлен")
           PY
 
-      - name: Лимит аккаунтов до 50 (пункт 7)
-        run: |
-          python3 - <<'PY'
-          import glob, re
-          for p in glob.glob("TMessagesProj/src/main/java/**/UserConfig.java", recursive=True):
-              s = open(p, encoding="utf-8").read()
-              n = re.sub(r'MAX_ACCOUNT_COUNT\s*=\s*\d+;', 'MAX_ACCOUNT_COUNT = 50;', s, count=1)
-              n = re.sub(r'MAX_ACCOUNT_DEFAULT_COUNT\s*=\s*\d+;', 'MAX_ACCOUNT_DEFAULT_COUNT = 50;', n, count=1)
-              n = n.replace("return hasPremiumOnAccounts() ? 5 : 3;", "return MAX_ACCOUNT_COUNT;")
-              if n != s:
-                  open(p, "w", encoding="utf-8").write(n); print("✅ лимит аккаунтов в", p)
-          PY
-
       - name: Скрыть Premium в настройках (пункт 6)
         run: |
           python3 - <<'PY'
