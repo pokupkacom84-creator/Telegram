@@ -555,25 +555,31 @@ jobs:
 
           tg = "TMessagesProj/src/main/java/org/telegram/tgnet"
           tlrpc = open(tg + "/TLRPC.java", encoding="utf-8").read()
+          updates_src = open(tg + "/tl/TL_update.java", encoding="utf-8").read()
 
-          def has(name):
+          def has_update(name):
+              ok = re.search(r'class\s+' + name + r'\b', updates_src) is not None
+              print(("  найден update " if ok else "  НЕ найден update ") + name)
+              return ok
+
+          def has_tlrpc(name):
               ok = re.search(r'class\s+' + name + r'\b', tlrpc) is not None
-              print(("  найден    " if ok else "  НЕ найден ") + name)
+              print(("  найден TL " if ok else "  НЕ найден TL ") + name)
               return ok
 
           cases = []
-          if has("TL_updateDeleteMessages"):
-              cases.append('if (u instanceof TLRPC.TL_updateDeleteMessages) { if (keepDeleted) { recordDeleted(0, ((TLRPC.TL_updateDeleteMessages) u).messages); updates.remove(i--); } continue; }')
-          if has("TL_updateDeleteChannelMessages"):
-              cases.append('if (u instanceof TLRPC.TL_updateDeleteChannelMessages) { TLRPC.TL_updateDeleteChannelMessages d = (TLRPC.TL_updateDeleteChannelMessages) u; long did = -(long) d.channel_id; if (keepDeleted && !isException(did)) { recordDeleted(did, d.messages); updates.remove(i--); } continue; }')
-          if has("TL_updateEditMessage"):
-              cases.append('if (u instanceof TLRPC.TL_updateEditMessage) { if (keepEdits) { recordEdit(((TLRPC.TL_updateEditMessage) u).message); } continue; }')
-          if has("TL_updateEditChannelMessage"):
-              cases.append('if (u instanceof TLRPC.TL_updateEditChannelMessage) { if (keepEdits) { recordEdit(((TLRPC.TL_updateEditChannelMessage) u).message); } continue; }')
+          if has_update("TL_updateDeleteMessages"):
+              cases.append('if (u instanceof TL_update.TL_updateDeleteMessages) { if (keepDeleted && !isExceptionForIds(controller, ((TL_update.TL_updateDeleteMessages) u).messages)) { if (recordDeleted(0, ((TL_update.TL_updateDeleteMessages) u).messages, controller)) updates.remove(i--); } continue; }')
+          if has_update("TL_updateDeleteChannelMessages"):
+              cases.append('if (u instanceof TL_update.TL_updateDeleteChannelMessages) { TL_update.TL_updateDeleteChannelMessages d = (TL_update.TL_updateDeleteChannelMessages) u; long did = -(long) d.channel_id; if (keepDeleted && !isException(did) && recordDeleted(did, d.messages, controller)) updates.remove(i--); continue; }')
+          if has_update("TL_updateEditMessage"):
+              cases.append('if (u instanceof TL_update.TL_updateEditMessage) { if (keepEdits) recordEdit(((TL_update.TL_updateEditMessage) u).message, controller); continue; }')
+          if has_update("TL_updateEditChannelMessage"):
+              cases.append('if (u instanceof TL_update.TL_updateEditChannelMessage) { if (keepEdits) recordEdit(((TL_update.TL_updateEditChannelMessage) u).message, controller); continue; }')
 
           status_impl = "private static void recordOnline(long userId, Object status) { }"
-          if has("TL_updateUserStatus") and has("TL_userStatusOffline"):
-              cases.append('if (u instanceof TLRPC.TL_updateUserStatus) { if (keepOnline) { recordOnline(((TLRPC.TL_updateUserStatus) u).user_id, ((TLRPC.TL_updateUserStatus) u).status); } continue; }')
+          if has_update("TL_updateUserStatus") and has_tlrpc("TL_userStatusOffline"):
+              cases.append('if (u instanceof TL_update.TL_updateUserStatus) { if (keepOnline) { recordOnline(((TL_update.TL_updateUserStatus) u).user_id, ((TL_update.TL_updateUserStatus) u).status); } continue; }')
               status_impl = """private static void recordOnline(long userId, Object status) {
                   try {
                       long ts = System.currentTimeMillis() / 1000;
@@ -596,6 +602,7 @@ jobs:
           import android.database.sqlite.SQLiteOpenHelper;
 
           import org.telegram.tgnet.TLRPC;
+          import org.telegram.tgnet.tl.TL_update;
           import org.telegram.ui.ActionBar.AlertDialog;
 
           import java.io.File;
@@ -609,6 +616,7 @@ jobs:
           import java.util.HashSet;
           import java.util.List;
           import java.util.Set;
+          import java.lang.reflect.Field;
 
           public class SpyMode {
               public static final String KEY_DELETED = "spy_deleted";
@@ -761,16 +769,22 @@ jobs:
               // ---- база данных ----
               private static synchronized SQLiteDatabase db() {
                   if (helper == null) {
-                      helper = new SQLiteOpenHelper(ApplicationLoader.applicationContext, "spy.db", null, 1) {
+                      helper = new SQLiteOpenHelper(ApplicationLoader.applicationContext, "spy.db", null, 2) {
                           @Override
                           public void onCreate(SQLiteDatabase d) {
-                              d.execSQL("CREATE TABLE IF NOT EXISTS deleted(dialog_id INTEGER, msg_id INTEGER, date INTEGER, PRIMARY KEY(dialog_id, msg_id))");
+                              d.execSQL("CREATE TABLE IF NOT EXISTS deleted(dialog_id INTEGER, msg_id INTEGER, date INTEGER, content TEXT, PRIMARY KEY(dialog_id, msg_id))");
                               d.execSQL("CREATE TABLE IF NOT EXISTS edits(dialog_id INTEGER, msg_id INTEGER, date INTEGER, text TEXT)");
                               d.execSQL("CREATE TABLE IF NOT EXISTS online(user_id INTEGER PRIMARY KEY, ts INTEGER)");
+                              d.execSQL("CREATE TABLE IF NOT EXISTS read_dates(dialog_id INTEGER, max_id INTEGER, ts INTEGER, direction INTEGER)");
                           }
 
                           @Override
-                          public void onUpgrade(SQLiteDatabase d, int o, int n) { }
+                          public void onUpgrade(SQLiteDatabase d, int o, int n) {
+                              if (o < 2) {
+                                  try { d.execSQL("ALTER TABLE deleted ADD COLUMN content TEXT"); } catch (Throwable ignore) { }
+                                  d.execSQL("CREATE TABLE IF NOT EXISTS read_dates(dialog_id INTEGER, max_id INTEGER, ts INTEGER, direction INTEGER)");
+                              }
+                          }
                       };
                   }
                   return helper.getWritableDatabase();
@@ -825,6 +839,7 @@ jobs:
                       d.delete("deleted", null, null);
                       d.delete("edits", null, null);
                       d.delete("online", null, null);
+                      d.delete("read_dates", null, null);
                       DELETED.clear();
                   } catch (Throwable ignore) { }
                   deleteRecContents(attachmentsDir());
@@ -871,7 +886,7 @@ jobs:
               }
 
               private static long keyDialog(MessageObject mo) {
-                  return mo.messageOwner.peer_id instanceof TLRPC.TL_peerChannel ? mo.getDialogId() : 0;
+                  return mo == null ? 0 : mo.getDialogId();
               }
 
               public static boolean isDeleted(MessageObject mo) {
@@ -884,12 +899,67 @@ jobs:
                   }
               }
 
-              /** добавляет пометку к времени сообщения, если оно было удалено */
+              private static long readTimestamp(long dialogId, int messageId) {
+                  if (!get(KEY_READ_DATE)) return 0;
+                  try {
+                      android.database.Cursor c = db().rawQuery("SELECT ts FROM read_dates WHERE dialog_id = ? AND max_id >= ? AND direction = 0 ORDER BY max_id ASC LIMIT 1",
+                              new String[]{String.valueOf(dialogId), String.valueOf(messageId)});
+                      try { return c.moveToFirst() ? c.getLong(0) : 0; } finally { c.close(); }
+                  } catch (Throwable ignore) { return 0; }
+              }
+
+              /** добавляет локальные отметки удаления и времени прочтения */
               public static String decorateTime(MessageObject mo, String time) {
-                  if (isDeleted(mo)) {
-                      return "🗑 удалено" + (time == null || time.length() == 0 ? "" : ", " + time);
+                  String result = time == null ? "" : time;
+                  if (isDeleted(mo)) result = "🗑 удалено" + (result.length() == 0 ? "" : ", " + result);
+                  if (mo != null && mo.messageOwner != null && mo.messageOwner.out) {
+                      long ts = readTimestamp(mo.getDialogId(), mo.getId());
+                      if (ts > 0) result += (result.length() == 0 ? "" : " · ") + "прочитано " + android.text.format.DateFormat.format("HH:mm", ts * 1000L);
                   }
-                  return time;
+                  return result;
+              }
+
+              private static Object fieldValue(Object object, String name) {
+                  try {
+                      Field f = object.getClass().getField(name);
+                      return f.get(object);
+                  } catch (Throwable ignore) { return null; }
+              }
+
+              private static long numberField(Object object, String name) {
+                  Object value = fieldValue(object, name);
+                  return value instanceof Number ? ((Number) value).longValue() : 0;
+              }
+
+              private static void recordReadUpdate(Object update) {
+                  if (!get(KEY_READ_DATE) || update == null) return;
+                  try {
+                      String name = update.getClass().getSimpleName();
+                      if (!name.contains("ReadHistory") && !name.contains("ReadChannel")) return;
+                      long dialogId = 0;
+                      Object peer = fieldValue(update, "peer");
+                      if (peer != null) {
+                          long userId = numberField(peer, "user_id");
+                          long chatId = numberField(peer, "chat_id");
+                          long channelId = numberField(peer, "channel_id");
+                          if (userId != 0) dialogId = userId;
+                          else if (chatId != 0) dialogId = -chatId;
+                          else if (channelId != 0) dialogId = -channelId;
+                      }
+                      if (dialogId == 0) {
+                          long channelId = numberField(update, "channel_id");
+                          if (channelId != 0) dialogId = -channelId;
+                      }
+                      long maxId = numberField(update, "max_id");
+                      if (dialogId == 0 || maxId <= 0) return;
+                      int direction = name.contains("Inbox") ? 0 : 1;
+                      ContentValues v = new ContentValues();
+                      v.put("dialog_id", dialogId);
+                      v.put("max_id", maxId);
+                      v.put("ts", System.currentTimeMillis() / 1000);
+                      v.put("direction", direction);
+                      db().insert("read_dates", null, v);
+                  } catch (Throwable ignore) { }
               }
 
               public static boolean hasEdits(MessageObject mo) {
@@ -965,32 +1035,64 @@ jobs:
                   } catch (Throwable ignore) { }
               }
 
-              private static void recordDeleted(long did, List<Integer> ids) {
-                  if (ids == null) return;
+              private static boolean isExceptionForIds(MessagesController controller, List<Integer> ids) {
+                  if (controller == null || ids == null) return false;
+                  for (Integer id : ids) {
+                      if (id == null) continue;
+                      MessageObject mo = controller.dialogMessagesByIds.get(id);
+                      if (mo != null && isException(mo.getDialogId())) return true;
+                  }
+                  return false;
+              }
+
+              private static boolean recordDeleted(long did, List<Integer> ids, MessagesController controller) {
+                  if (ids == null || ids.isEmpty() || controller == null) return false;
+                  boolean complete = true;
                   try {
                       SQLiteDatabase d = db();
                       long now = System.currentTimeMillis() / 1000;
                       for (int k = 0; k < ids.size(); k++) {
+                          Integer id = ids.get(k);
+                          MessageObject mo = id == null ? null : controller.dialogMessagesByIds.get(id);
+                          if (mo == null || (did != 0 && mo.getDialogId() != did)) {
+                              complete = false;
+                              continue;
+                          }
+                          long actualDialog = mo.getDialogId();
+                          if (isException(actualDialog)) {
+                              complete = false;
+                              continue;
+                          }
+                          String content = mo.messageOwner == null ? "" : mo.messageOwner.message;
                           ContentValues v = new ContentValues();
-                          v.put("dialog_id", did);
-                          v.put("msg_id", ids.get(k));
+                          v.put("dialog_id", actualDialog);
+                          v.put("msg_id", id);
                           v.put("date", now);
-                          d.insertWithOnConflict("deleted", null, v, SQLiteDatabase.CONFLICT_IGNORE);
-                          DELETED.add(did + "_" + ids.get(k));
+                          v.put("content", content == null ? "" : content);
+                          d.insertWithOnConflict("deleted", null, v, SQLiteDatabase.CONFLICT_REPLACE);
+                          DELETED.add(actualDialog + "_" + id);
                       }
-                  } catch (Throwable ignore) { }
+                  } catch (Throwable ignore) {
+                      return false;
+                  }
+                  return complete;
               }
 
-              private static void recordEdit(TLRPC.Message m) {
-                  if (m == null) return;
+              private static void recordEdit(TLRPC.Message m, MessagesController controller) {
+                  if (m == null || controller == null) return;
                   try {
                       long did = MessageObject.getDialogId(m);
                       if (isException(did)) return;
+                      MessageObject old = controller.dialogMessagesByIds.get(m.id);
+                      if (old == null || old.messageOwner == null || old.getDialogId() != did) return;
+                      String previous = old.messageOwner.message;
+                      if (previous == null) previous = "";
+                      if (previous.equals(m.message == null ? "" : m.message)) return;
                       ContentValues v = new ContentValues();
                       v.put("dialog_id", did);
                       v.put("msg_id", m.id);
                       v.put("date", m.edit_date != 0 ? m.edit_date : (int) (System.currentTimeMillis() / 1000));
-                      v.put("text", m.message);
+                      v.put("text", previous);
                       db().insert("edits", null, v);
                   } catch (Throwable ignore) { }
               }
@@ -998,14 +1100,15 @@ jobs:
               @STATUS_IMPL@
 
               /** Вызывается из MessagesController.processUpdateArray: удалённые сообщения остаются в чате. */
-              public static void filterUpdates(ArrayList<TLRPC.Update> updates) {
-                  if (updates == null) return;
+              public static void filterUpdates(MessagesController controller, ArrayList<TLRPC.Update> updates) {
+                  if (updates == null || controller == null) return;
                   try {
                       boolean keepDeleted = get(KEY_DELETED);
                       boolean keepEdits = get(KEY_EDITS);
                       boolean keepOnline = get(KEY_LAST_ONLINE);
                       for (int i = 0; i < updates.size(); i++) {
                           TLRPC.Update u = updates.get(i);
+                          recordReadUpdate(u);
                           @CASES@
                       }
                   } catch (Throwable ignore) { }
@@ -1022,7 +1125,7 @@ jobs:
           count = [0]
           def rep(m):
               count[0] += 1
-              return m.group(1) + "\n        org.telegram.messenger.SpyMode.filterUpdates(%s);" % m.group(2)
+              return m.group(1) + "\n        org.telegram.messenger.SpyMode.filterUpdates(this, %s);" % m.group(2)
           new = pat.sub(rep, src)
           print("MessagesController.processUpdateArray: пропатчено методов:", count[0])
           if count[0] == 0:
