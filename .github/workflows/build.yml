@@ -16,12 +16,27 @@ on:
         description: "Сменить имя пакета и название приложения"
         type: boolean
         default: true
+      ghost_read:
+        description: "Призрак: не отправлять «прочитано» (чаты, голосовые)"
+        type: boolean
+        default: true
+      ghost_typing:
+        description: "Призрак: не показывать «печатает…»"
+        type: boolean
+        default: true
+      ghost_online:
+        description: "Призрак: не показывать «в сети»"
+        type: boolean
+        default: true
 
 env:
   APP_NAME: FluxGram
   APP_PACKAGE: com.fluxgram.app
   ABI: ${{ inputs.abi }}
   REBRAND: ${{ inputs.rebrand }}
+  GHOST_READ: ${{ inputs.ghost_read }}
+  GHOST_TYPING: ${{ inputs.ghost_typing }}
+  GHOST_ONLINE: ${{ inputs.ghost_online }}
 
 defaults:
   run:
@@ -156,6 +171,311 @@ jobs:
           PY
           grep -rn "applicationId" --include=build.gradle . | grep -v jni || true
           grep -n 'name="AppName' TMessagesProj/src/main/res/values/strings.xml || true
+
+      - name: Режим призрака (патч исходников)
+        run: |
+          python3 - <<'PY'
+          import re, os, sys
+
+          READ   = os.environ.get("GHOST_READ", "true") == "true"
+          TYPING = os.environ.get("GHOST_TYPING", "true") == "true"
+          ONLINE = os.environ.get("GHOST_ONLINE", "true") == "true"
+          print("ghost defaults: read=%s typing=%s online=%s" % (READ, TYPING, ONLINE))
+
+          tg = "TMessagesProj/src/main/java/org/telegram/tgnet"
+          tlrpc = open(tg + "/TLRPC.java", encoding="utf-8").read()
+
+          def has(name):
+              ok = re.search(r'class\s+' + name + r'\b', tlrpc) is not None
+              print(("  найден    " if ok else "  НЕ найден ") + name)
+              return ok
+
+          checks = []
+          for n in ("TL_messages_readHistory", "TL_channels_readHistory",
+                    "TL_messages_readMessageContents", "TL_channels_readMessageContents"):
+              if has(n):
+                  checks.append("if (req instanceof TLRPC.%s) return get(KEY_READ);" % n)
+          if has("TL_messages_setTyping"):
+              checks.append("if (req instanceof TLRPC.TL_messages_setTyping) return get(KEY_TYPING);")
+          if has("TL_account_updateStatus"):
+              checks.append("if (req instanceof TLRPC.TL_account_updateStatus) { if (get(KEY_ONLINE)) { ((TLRPC.TL_account_updateStatus) req).offline = true; } return false; }")
+
+          java = """package org.telegram.messenger;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+
+          import org.telegram.tgnet.TLObject;
+          import org.telegram.tgnet.TLRPC;
+
+          public class GhostMode {
+              public static final String KEY_READ = "ghost_read";
+              public static final String KEY_TYPING = "ghost_typing";
+              public static final String KEY_ONLINE = "ghost_online";
+
+              private static SharedPreferences prefs() {
+                  Context c = ApplicationLoader.applicationContext;
+                  return c == null ? null : c.getSharedPreferences("ghostmode", Context.MODE_PRIVATE);
+              }
+
+              private static boolean def(String key) {
+                  if (KEY_READ.equals(key)) return @READ@;
+                  if (KEY_TYPING.equals(key)) return @TYPING@;
+                  if (KEY_ONLINE.equals(key)) return @ONLINE@;
+                  return false;
+              }
+
+              public static boolean get(String key) {
+                  SharedPreferences p = prefs();
+                  return p == null ? def(key) : p.getBoolean(key, def(key));
+              }
+
+              public static void set(String key, boolean value) {
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putBoolean(key, value).apply();
+                  }
+              }
+
+              /** true = запрос не отправлять на сервер */
+              public static boolean drop(TLObject req) {
+                  if (req == null) return false;
+                  @CHECKS@
+                  return false;
+              }
+          }
+          """
+          java = (java.replace("@READ@", str(READ).lower())
+                      .replace("@TYPING@", str(TYPING).lower())
+                      .replace("@ONLINE@", str(ONLINE).lower())
+                      .replace("@CHECKS@", "\n        ".join(checks)))
+          open("TMessagesProj/src/main/java/org/telegram/messenger/GhostMode.java", "w", encoding="utf-8").write(java)
+
+          cm = tg + "/ConnectionsManager.java"
+          src = open(cm, encoding="utf-8").read()
+          pat = re.compile(r'(public\s+(?:synchronized\s+)?int\s+sendRequest\w*\s*\(\s*(?:final\s+)?(?:org\.telegram\.tgnet\.)?TLObject\s+(\w+)\s*,[^{;]*?\)\s*(?:throws[^{]*)?\{)', re.S)
+          count = [0]
+          def rep(m):
+              count[0] += 1
+              return m.group(1) + "\n        if (org.telegram.messenger.GhostMode.drop(%s)) { return 0; }" % m.group(2)
+          new = pat.sub(rep, src)
+          print("ConnectionsManager: пропатчено методов:", count[0])
+          if count[0] == 0:
+              print("::error::Не нашёл sendRequest в ConnectionsManager. Сигнатуры:")
+              for l in src.splitlines():
+                  if "sendRequest" in l and ("public" in l or "private" in l):
+                      print("   ", l.strip())
+              sys.exit(1)
+          open(cm, "w", encoding="utf-8").write(new)
+          PY
+          echo "--- GhostMode.java ---"
+          cat TMessagesProj/src/main/java/org/telegram/messenger/GhostMode.java
+          echo "--- хуки ---"
+          grep -n "GhostMode" TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
+
+      - name: Пункт «Настройки Ghost» в настройках приложения
+        run: |
+          python3 - <<'PY'
+          import re, os, glob
+
+          # Пункт «Настройки Ghost» в настройках приложения (мягкий патч:
+          # если что-то не нашлось — пункт не добавляется, сборка продолжается).
+          base = "TMessagesProj/src/main/java/org/telegram/ui"
+          sa_path = base + "/SettingsActivity.java"
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+
+          def report(msg):
+              print(msg)
+              if summary:
+                  open(summary, "a", encoding="utf-8").write(msg + "\n\n")
+
+          def bail(why):
+              report("⚠️ Пункт «Настройки Ghost» НЕ добавлен: " + why + " (призрак по build-флагам работает)")
+              raise SystemExit(0)
+
+          if not os.path.exists(sa_path):
+              bail("нет SettingsActivity.java")
+
+          # проверяем, что нужные классы и ресурсы есть в этой версии
+          need_files = [base + "/Cells/TextCheckCell.java", base + "/Cells/HeaderCell.java",
+                        base + "/ActionBar/BaseFragment.java", base + "/ActionBar/ActionBar.java",
+                        base + "/ActionBar/Theme.java"]
+          for f in need_files:
+              if not os.path.exists(f):
+                  bail("нет файла " + f)
+          theme = open(base + "/ActionBar/Theme.java", encoding="utf-8").read()
+          if "key_windowBackgroundGray" not in theme or "key_windowBackgroundWhite" not in theme:
+              bail("нет ключей темы")
+          ab = open(base + "/ActionBar/ActionBar.java", encoding="utf-8").read()
+          if "ActionBarMenuOnItemClick" not in ab or "setAllowOverlayTitle" not in ab:
+              bail("другой API ActionBar")
+          tcc = open(base + "/Cells/TextCheckCell.java", encoding="utf-8").read()
+          if "setTextAndCheck(" not in tcc:
+              bail("нет TextCheckCell.setTextAndCheck")
+          hc = open(base + "/Cells/HeaderCell.java", encoding="utf-8").read()
+          if "void setText(" not in hc:
+              bail("нет HeaderCell.setText")
+
+          res = "TMessagesProj/src/main/res"
+          def drawable_exists(n):
+              return bool(glob.glob(res + "/drawable*/" + n + ".*"))
+          if not drawable_exists("ic_ab_back"):
+              bail("нет ic_ab_back")
+          icon = None
+          for cand in ("msg2_ghost", "msg_ghost", "msg_secret", "msg_settings_old", "msg_settings"):
+              if drawable_exists(cand):
+                  icon = cand
+                  break
+          if not icon:
+              bail("не нашёл иконку")
+          print("иконка:", icon)
+
+          # --- фрагмент настроек ---
+          frag = """package org.telegram.ui;
+
+          import android.content.Context;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+
+          import org.telegram.messenger.GhostMode;
+          import org.telegram.messenger.R;
+          import org.telegram.ui.ActionBar.ActionBar;
+          import org.telegram.ui.ActionBar.BaseFragment;
+          import org.telegram.ui.ActionBar.Theme;
+          import org.telegram.ui.Cells.HeaderCell;
+          import org.telegram.ui.Cells.TextCheckCell;
+
+          public class GhostSettingsActivity extends BaseFragment {
+
+              @Override
+              public View createView(Context context) {
+                  actionBar.setBackButtonImage(R.drawable.ic_ab_back);
+                  actionBar.setAllowOverlayTitle(true);
+                  actionBar.setTitle("Настройки Ghost");
+                  actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
+                      @Override
+                      public void onItemClick(int id) {
+                          if (id == -1) {
+                              finishFragment();
+                          }
+                      }
+                  });
+
+                  FrameLayout root = new FrameLayout(context);
+                  root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
+                  fragmentView = root;
+
+                  ScrollView scroll = new ScrollView(context);
+                  root.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+                  LinearLayout list = new LinearLayout(context);
+                  list.setOrientation(LinearLayout.VERTICAL);
+                  scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  HeaderCell header = new HeaderCell(context);
+                  header.setText("Режим призрака");
+                  header.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  list.addView(header, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  addSwitch(list, context, "Не отмечать сообщения прочитанными", GhostMode.KEY_READ, true);
+                  addSwitch(list, context, "Не показывать «печатает…»", GhostMode.KEY_TYPING, true);
+                  addSwitch(list, context, "Скрывать статус «в сети»", GhostMode.KEY_ONLINE, false);
+
+                  return fragmentView;
+              }
+
+              private void addSwitch(LinearLayout list, Context context, String title, final String key, boolean divider) {
+                  TextCheckCell cell = new TextCheckCell(context);
+                  cell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  cell.setTextAndCheck(title, GhostMode.get(key), divider);
+                  cell.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          boolean value = !GhostMode.get(key);
+                          GhostMode.set(key, value);
+                          ((TextCheckCell) v).setChecked(value);
+                      }
+                  });
+                  list.addView(cell, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+              }
+          }
+          """
+
+          # --- патч SettingsActivity ---
+          orig = open(sa_path, encoding="utf-8").read()
+          TITLE = "Настройки Ghost"
+
+          def try_patch(X):
+              s = orig
+              # 1) поле
+              m = re.search(r'class\s+SettingsActivity\s+extends[^{]*\{', s)
+              if not m:
+                  return None, "не нашёл объявление класса"
+              s = s[:m.end()] + "\n    private int ghostRow = -1;\n" + s[m.end():]
+
+              # 2) строка в updateRows()
+              anchor = X + " = rowCount++;"
+              if anchor not in s:
+                  return None, "нет '%s'" % anchor
+              s = s.replace(anchor, "ghostRow = rowCount++;\n        " + anchor, 1)
+
+              # 3) обработчики клика / отрисовки
+              pat = re.compile(r'(else\s+)?if\s*\(\s*position\s*==\s*' + X + r'\s*\)\s*\{')
+              clicks = [0]; binds = [0]
+              out = []; last = 0
+              for m in pat.finditer(s):
+                  look = s[m.end(): m.end() + 260]
+                  pre = m.group(1) or ""
+                  ip = look.find("presentFragment")
+                  it = look.find("setTextAndIcon")
+                  if ip != -1 and (it == -1 or ip < it):
+                      body = "presentFragment(new GhostSettingsActivity());"
+                      clicks[0] += 1
+                  else:
+                      mm = re.search(r'(\w+)\.setTextAndIcon\s*\(', look)
+                      if not mm:
+                          continue
+                      body = '%s.setTextAndIcon("%s", R.drawable.%s, true);' % (mm.group(1), TITLE, icon)
+                      binds[0] += 1
+                  out.append(s[last:m.start()])
+                  out.append("%sif (position == ghostRow) { %s } else if (position == %s) {" % (pre, body, X))
+                  last = m.end()
+              out.append(s[last:])
+              s = "".join(out)
+              if clicks[0] < 1 or binds[0] < 1:
+                  return None, "клик=%d отрисовка=%d" % (clicks[0], binds[0])
+
+              # 4) тип ячейки (getItemViewType)
+              vt = re.compile(r'position\s*==\s*' + X + r'\s*\|\|')
+              if not vt.search(s):
+                  return None, "нет '%s ||' в getItemViewType" % X
+              s = vt.sub("position == ghostRow || position == " + X + " ||", s, count=1)
+              return s, "ok (клик=%d, отрисовка=%d)" % (clicks[0], binds[0])
+
+          result = None
+          log = []
+          for X in ("notificationRow", "privacyRow", "languageRow", "dataRow", "chatRow"):
+              r, msg = try_patch(X)
+              log.append("  %s: %s" % (X, msg))
+              if r is not None:
+                  result = (X, r)
+                  break
+          print("\n".join(log))
+          if result is None:
+              print("--- строки с Row в SettingsActivity (для отладки) ---")
+              for i, l in enumerate(orig.splitlines()):
+                  if re.search(r'position\s*==\s*\w+Row', l) or "rowCount++" in l:
+                      print("%5d  %s" % (i + 1, l.strip()))
+                      if i > 400: break
+              bail("не нашёл якоря в SettingsActivity")
+
+          open(base + "/GhostSettingsActivity.java", "w", encoding="utf-8").write(frag)
+          open(sa_path, "w", encoding="utf-8").write(result[1])
+          report("✅ Пункт «%s» добавлен в настройки (якорь: %s, иконка: %s)" % (TITLE, result[0], icon))
+          PY
 
       - name: API ключи (необязательно, из secrets APP_ID / APP_HASH)
         env:
