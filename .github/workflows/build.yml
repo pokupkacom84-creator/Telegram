@@ -389,16 +389,41 @@ jobs:
           echo "--- хуки ---"
           grep -n "GhostMode" TMessagesProj/src/main/java/org/telegram/tgnet/ConnectionsManager.java
 
-      - name: Пункт «FluxGram» в настройках приложения
+      - name: Переименование Telegram → FluxGram (строки интерфейса)
+        if: ${{ env.REBRAND != 'false' }}
+        run: |
+          python3 - <<'PY'
+          import re, glob, os
+
+          NAME = os.environ["APP_NAME"]
+          # не трогаем ссылки, @юзернеймы, #теги и части слов (TelegramPremium и т.п.)
+          pat = re.compile(r'(?<![A-Za-z0-9_/@.#:=-])Telegram(?![A-Za-z0-9_])')
+
+          def fix(m):
+              return m.group(1) + pat.sub(NAME, m.group(2)) + m.group(3)
+
+          files = [f for f in glob.glob("**/res/values*/strings*.xml", recursive=True)
+                   if not f.startswith(".git") and "/jni/" not in f]
+          total = 0
+          for f in files:
+              s = open(f, encoding="utf-8").read()
+              n = re.sub(r'(>)([^<]+)(<)', fix, s)
+              if n != s:
+                  total += len(pat.findall(re.sub(r'<[^>]*>', ' ', s)))
+                  open(f, "w", encoding="utf-8").write(n)
+          print("файлов strings:", len(files), " замен Telegram ->", NAME, ":", total)
+          PY
+
+      - name: Раздел «Настройки FluxGram» в настройках приложения
         run: |
           python3 - <<'PY'
           import re, os, glob
 
-          # Пункт «FluxGram» в настройках приложения (мягкий патч:
-          # если что-то не нашлось — пункт не добавляется, сборка продолжается).
           base = "TMessagesProj/src/main/java/org/telegram/ui"
           sa_path = base + "/SettingsActivity.java"
+          res = "TMessagesProj/src/main/res"
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          TITLE = "Настройки FluxGram"
 
           def report(msg):
               print(msg)
@@ -406,47 +431,43 @@ jobs:
                   open(summary, "a", encoding="utf-8").write(msg + "\n\n")
 
           def bail(why):
-              report("⚠️ Пункт «FluxGram» НЕ добавлен: " + why + " (призрак по build-флагам работает)")
+              report("⚠️ Пункт «%s» НЕ добавлен: %s (призрак по build-флагам работает)" % (TITLE, why))
+              print("::warning::Пункт FluxGram не добавлен: " + why)
               raise SystemExit(0)
 
           if not os.path.exists(sa_path):
               bail("нет SettingsActivity.java")
 
-          # проверяем, что нужные классы и ресурсы есть в этой версии
-          need_files = [base + "/Cells/TextCheckCell.java", base + "/Cells/HeaderCell.java",
-                        base + "/ActionBar/BaseFragment.java", base + "/ActionBar/ActionBar.java",
-                        base + "/ActionBar/Theme.java"]
-          for f in need_files:
+          for f in (base + "/Cells/TextCheckCell.java", base + "/Cells/HeaderCell.java",
+                    base + "/ActionBar/BaseFragment.java", base + "/ActionBar/ActionBar.java",
+                    base + "/ActionBar/Theme.java"):
               if not os.path.exists(f):
                   bail("нет файла " + f)
           theme = open(base + "/ActionBar/Theme.java", encoding="utf-8").read()
-          if "key_windowBackgroundGray" not in theme or "key_windowBackgroundWhite" not in theme or "key_windowBackgroundWhiteGrayText4" not in theme:
-              bail("нет ключей темы")
+          for k in ("key_windowBackgroundGray", "key_windowBackgroundWhite", "key_windowBackgroundWhiteGrayText4"):
+              if k not in theme:
+                  bail("нет ключа темы " + k)
+          if "setTextAndCheck(" not in open(base + "/Cells/TextCheckCell.java", encoding="utf-8").read():
+              bail("нет TextCheckCell.setTextAndCheck")
+          if "void setText(" not in open(base + "/Cells/HeaderCell.java", encoding="utf-8").read():
+              bail("нет HeaderCell.setText")
           ab = open(base + "/ActionBar/ActionBar.java", encoding="utf-8").read()
           if "ActionBarMenuOnItemClick" not in ab or "setAllowOverlayTitle" not in ab:
               bail("другой API ActionBar")
-          tcc = open(base + "/Cells/TextCheckCell.java", encoding="utf-8").read()
-          if "setTextAndCheck(" not in tcc:
-              bail("нет TextCheckCell.setTextAndCheck")
-          hc = open(base + "/Cells/HeaderCell.java", encoding="utf-8").read()
-          if "void setText(" not in hc:
-              bail("нет HeaderCell.setText")
-
-          res = "TMessagesProj/src/main/res"
-          def drawable_exists(n):
-              return bool(glob.glob(res + "/drawable*/" + n + ".*"))
-          if not drawable_exists("ic_ab_back"):
+          if not glob.glob(res + "/drawable*/ic_ab_back.*"):
               bail("нет ic_ab_back")
-          icon = None
-          for cand in ("msg2_ghost", "msg_ghost", "msg_secret", "msg_settings_old", "msg_settings"):
-              if drawable_exists(cand):
-                  icon = cand
-                  break
-          if not icon:
-              bail("не нашёл иконку")
-          print("иконка:", icon)
 
-          # --- фрагмент настроек ---
+          # --- иконка пункта (белый самолётик на цветном фоне)
+          os.makedirs(res + "/drawable", exist_ok=True)
+          open(res + "/drawable/settings_fluxgram.xml", "w", encoding="utf-8").write(
+              '<vector xmlns:android="http://schemas.android.com/apk/res/android"\n'
+              '    android:width="24dp" android:height="24dp"\n'
+              '    android:viewportWidth="24" android:viewportHeight="24">\n'
+              '    <path android:fillColor="#FFFFFFFF"\n'
+              '        android:pathData="M2.01,21L23,12 2.01,3 2,10l15,2 -15,2z"/>\n'
+              '</vector>\n')
+
+          # --- экран настроек
           frag = """package org.telegram.ui;
 
           import android.content.Context;
@@ -594,80 +615,30 @@ jobs:
                   note.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(10), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
                   list.addView(note, matchWrap());
               }
-          }
-          """
-
-          # --- патч SettingsActivity ---
-          orig = open(sa_path, encoding="utf-8").read()
-          TITLE = "FluxGram"
-
-          def try_patch(X):
-              s = orig
-              # 1) поле
-              m = re.search(r'class\s+SettingsActivity\s+extends[^{]*\{', s)
-              if not m:
-                  return None, "не нашёл объявление класса"
-              s = s[:m.end()] + "\n    private int ghostRow = -1;\n" + s[m.end():]
-
-              # 2) строка в updateRows()
-              anchor = X + " = rowCount++;"
-              if anchor not in s:
-                  return None, "нет '%s'" % anchor
-              s = s.replace(anchor, "ghostRow = rowCount++;\n        " + anchor, 1)
-
-              # 3) обработчики клика / отрисовки
-              pat = re.compile(r'(else\s+)?if\s*\(\s*position\s*==\s*' + X + r'\s*\)\s*\{')
-              clicks = [0]; binds = [0]
-              out = []; last = 0
-              for m in pat.finditer(s):
-                  look = s[m.end(): m.end() + 260]
-                  pre = m.group(1) or ""
-                  ip = look.find("presentFragment")
-                  it = look.find("setTextAndIcon")
-                  if ip != -1 and (it == -1 or ip < it):
-                      body = "presentFragment(new GhostSettingsActivity());"
-                      clicks[0] += 1
-                  else:
-                      mm = re.search(r'(\w+)\.setTextAndIcon\s*\(', look)
-                      if not mm:
-                          continue
-                      body = '%s.setTextAndIcon("%s", R.drawable.%s, true);' % (mm.group(1), TITLE, icon)
-                      binds[0] += 1
-                  out.append(s[last:m.start()])
-                  out.append("%sif (position == ghostRow) { %s } else if (position == %s) {" % (pre, body, X))
-                  last = m.end()
-              out.append(s[last:])
-              s = "".join(out)
-              if clicks[0] < 1 or binds[0] < 1:
-                  return None, "клик=%d отрисовка=%d" % (clicks[0], binds[0])
-
-              # 4) тип ячейки (getItemViewType)
-              vt = re.compile(r'position\s*==\s*' + X + r'\s*\|\|')
-              if not vt.search(s):
-                  return None, "нет '%s ||' в getItemViewType" % X
-              s = vt.sub("position == ghostRow || position == " + X + " ||", s, count=1)
-              return s, "ok (клик=%d, отрисовка=%d)" % (clicks[0], binds[0])
-
-          result = None
-          log = []
-          for X in ("notificationRow", "privacyRow", "languageRow", "dataRow", "chatRow"):
-              r, msg = try_patch(X)
-              log.append("  %s: %s" % (X, msg))
-              if r is not None:
-                  result = (X, r)
-                  break
-          print("\n".join(log))
-          if result is None:
-              print("--- строки с Row в SettingsActivity (для отладки) ---")
-              for i, l in enumerate(orig.splitlines()):
-                  if re.search(r'position\s*==\s*\w+Row', l) or "rowCount++" in l:
-                      print("%5d  %s" % (i + 1, l.strip()))
-                      if i > 400: break
-              bail("не нашёл якоря в SettingsActivity")
-
+          }"""
           open(base + "/GhostSettingsActivity.java", "w", encoding="utf-8").write(frag)
-          open(sa_path, "w", encoding="utf-8").write(result[1])
-          report("✅ Пункт «%s» добавлен в настройки (якорь: %s, иконка: %s)" % (TITLE, result[0], icon))
+
+          # --- пункт в SettingsActivity: отдельная группа после блока «Язык»
+          s = open(sa_path, encoding="utf-8").read()
+          m = re.search(r'\n([ \t]*)items\.add\(SettingCell\.Factory\.of\(10,[^\n]*\);', s)
+          if not m:
+              bail("не нашёл строку пункта «Язык» (id 10) в SettingsActivity")
+          ind = m.group(1)
+          new_item = ('\n' + ind + 'items.add(UItem.asShadow(null));' +
+                      '\n' + ind + 'items.add(SettingCell.Factory.of(28, 0xFF9B6BFF, 0xFF7B4DE8, R.drawable.settings_fluxgram, "' + TITLE + '"));')
+          s = s[:m.end()] + new_item + s[m.end():]
+
+          mc = re.search(r'\n([ \t]*)case 24:', s)
+          if not mc:
+              bail("не нашёл обработчик клика (case 24)")
+          ind2 = mc.group(1)
+          click = ('\n' + ind2 + 'case 28: {' +
+                   '\n' + ind2 + '    presentFragment(new GhostSettingsActivity());' +
+                   '\n' + ind2 + '    break;' +
+                   '\n' + ind2 + '}')
+          s = s[:mc.start()] + click + s[mc.start():]
+          open(sa_path, "w", encoding="utf-8").write(s)
+          report("✅ Пункт «%s» добавлен в настройки отдельной группой" % TITLE)
           PY
 
       - name: API ключи (необязательно, из secrets APP_ID / APP_HASH)
