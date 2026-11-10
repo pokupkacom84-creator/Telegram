@@ -1,0 +1,187 @@
+name: FluxGram: иконки и Material You (патч исходников)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Ветка, в которую запишем патч"
+        type: string
+        default: fluxgram-icons
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout (main)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Проверка исходных иконок
+        run: |
+          for f in icons/fluxgram_dark.png icons/fluxgram_blue.png; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Нет файла $f. Положите картинки 2 и 3 в папку icons/"
+              exit 1
+            fi
+          done
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq imagemagick
+
+      - name: Иконки: прозрачные углы и размеры mipmap
+        run: |
+          set -e
+          sizes="mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192"
+          for pair in "dark:icons/fluxgram_dark.png" "blue:icons/fluxgram_blue.png"; do
+            name="${pair%%:*}"
+            src="${pair#*:}"
+            W=$(identify -format %w "$src")
+            H=$(identify -format %h "$src")
+            for d in $sizes; do
+              dpi="${d%%:*}"
+              px="${d#*:}"
+              out="TMessagesProj/src/main/res/mipmap-$dpi/ic_launcher_fluxgram_$name.png"
+              mkdir -p "$(dirname "$out")"
+              # Углы вырезаем заливкой от каждого угла, центр не трогаем
+              convert "$src" -alpha set -fuzz 4% \
+                -draw "matte 0,0 floodfill" \
+                -draw "matte $((W-1)),0 floodfill" \
+                -draw "matte 0,$((H-1)) floodfill" \
+                -draw "matte $((W-1)),$((H-1)) floodfill" \
+                -resize "${px}x${px}" "$out"
+            done
+          done
+          ls -R TMessagesProj/src/main/res | grep fluxgram || true
+
+      - name: Манифест: алиасы иконок
+        run: |
+          python3 - <<'PY'
+          import glob, os, re
+
+          man = "TMessagesProj/src/main/AndroidManifest.xml"
+          if not os.path.exists(man) or "LaunchActivity" not in open(man, encoding="utf-8").read():
+              found = [m for m in glob.glob("TMessagesProj*/src/main/AndroidManifest.xml")
+                       if "LaunchActivity" in open(m, encoding="utf-8").read()]
+              if not found:
+                  raise SystemExit("AndroidManifest с LaunchActivity не найден")
+              man = found[0]
+          print("манифест:", man)
+
+          s = open(man, encoding="utf-8").read()
+          if 'android:name=".FluxIconDark"' in s:
+              print("алиасы уже есть, пропускаю")
+              raise SystemExit(0)
+
+          m = re.search(r'<activity\b[^>]*android:name="([^"]*LaunchActivity)"[^>]*>.*?</activity>', s, re.S)
+          if not m:
+              raise SystemExit("Блок LaunchActivity не найден")
+          target = m.group(1)
+
+          # LAUNCHER убираем с самой активности, иначе будет два ярлыка
+          block = re.sub(r'\s*<category android:name="android.intent.category.LAUNCHER"\s*/>', '', m.group(0))
+          s = s.replace(m.group(0), block, 1)
+
+          def alias(name, icon, enabled):
+              return (f'\n    <activity-alias android:name=".{name}" android:enabled="{enabled}"'
+                      f' android:exported="true" android:icon="{icon}"'
+                      f' android:label="@string/AppName" android:targetActivity="{target}">'
+                      f'<intent-filter><action android:name="android.intent.action.MAIN" />'
+                      f'<category android:name="android.intent.category.LAUNCHER" /></intent-filter>'
+                      f'</activity-alias>')
+
+          aliases = (alias("FluxIconDefault", "@mipmap/ic_launcher", "true")
+                     + alias("FluxIconDark", "@mipmap/ic_launcher_fluxgram_dark", "false")
+                     + alias("FluxIconBlue", "@mipmap/ic_launcher_fluxgram_blue", "false"))
+          s = s.replace("</application>", aliases + "\n</application>", 1)
+          open(man, "w", encoding="utf-8").write(s)
+          print("алиасы добавлены")
+          PY
+
+      - name: Java: FluxFeatures
+        run: |
+          mkdir -p TMessagesProj/src/main/java/org/telegram/messenger
+          cat > TMessagesProj/src/main/java/org/telegram/messenger/FluxFeatures.java <<'JAVA'
+          package org.telegram.messenger;
+
+          import android.content.ComponentName;
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.content.pm.PackageManager;
+          import android.os.Build;
+
+          public final class FluxFeatures {
+              private static final String PREFS = "fluxgram_prefs";
+              public static final String ICON_DEFAULT = "FluxIconDefault";
+              public static final String ICON_DARK = "FluxIconDark";
+              public static final String ICON_BLUE = "FluxIconBlue";
+              private static final String[] ICONS = {ICON_DEFAULT, ICON_DARK, ICON_BLUE};
+
+              private static SharedPreferences prefs(Context c) {
+                  return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+              }
+
+              public static boolean isMaterialYou(Context c) {
+                  return prefs(c).getBoolean("material_you", false);
+              }
+
+              public static void setMaterialYou(Context c, boolean on) {
+                  prefs(c).edit().putBoolean("material_you", on).apply();
+              }
+
+              public static String getIcon(Context c) {
+                  return prefs(c).getString("icon", ICON_DEFAULT);
+              }
+
+              public static void setIcon(Context c, String alias) {
+                  PackageManager pm = c.getPackageManager();
+                  String pkg = FluxFeatures.class.getPackage().getName();
+                  for (String a : ICONS) {
+                      ComponentName cn = new ComponentName(c, pkg + "." + a);
+                      pm.setComponentEnabledSetting(cn,
+                              a.equals(alias)
+                                      ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                                      : PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                              PackageManager.DONT_KILL_APP);
+                  }
+                  prefs(c).edit().putString("icon", alias).apply();
+              }
+
+              // Акцент: системный Material You на Android 12+, иначе фирменный цвет
+              public static int accent(Context c, int fallback) {
+                  if (isMaterialYou(c) && Build.VERSION.SDK_INT >= 31) {
+                      return c.getResources().getColor(android.R.color.system_accent1_400);
+                  }
+                  return fallback;
+              }
+
+              // Фон: системный Material You на Android 12+, иначе фирменный цвет
+              public static int surface(Context c, int fallback) {
+                  if (isMaterialYou(c) && Build.VERSION.SDK_INT >= 31) {
+                      return c.getResources().getColor(android.R.color.system_neutral1_900);
+                  }
+                  return fallback;
+              }
+          }
+          JAVA
+          echo "FluxFeatures.java создан"
+
+      - name: Коммит и пуш в ветку
+        env:
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Изменений нет"
+          else
+            git commit -m "FluxGram: иконки, алиасы и FluxFeatures"
+            git push -f origin "$BRANCH"
+          fi
+          echo "Ветка: $BRANCH"
