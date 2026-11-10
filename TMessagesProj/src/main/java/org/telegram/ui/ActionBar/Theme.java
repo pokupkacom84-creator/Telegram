@@ -82,6 +82,7 @@ import org.telegram.messenger.Bitmaps;
 import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.FileLoader;
 import org.telegram.messenger.FileLog;
+import org.telegram.messenger.FluxFeatures;
 import org.telegram.messenger.ImageLocation;
 import org.telegram.messenger.LiteMode;
 import org.telegram.messenger.MediaController;
@@ -9143,6 +9144,13 @@ public class Theme {
      * {@link #getColor(int)} without the animated colors, on the given color table: also used while a new table is computed
      * and not published yet ({@link ThemeAccent#fillAccentColors}).
      */
+private static int getColorFromTable(SparseIntArray currentColors, int key, boolean[] isDefault) {
+        Integer fluxColor = FluxFeatures.override(key);
+        if (fluxColor != null) {
+            return fluxColor;
+        }
+
+    
     private static int getColorFromTable(SparseIntArray currentColors, int key, boolean[] isDefault) {
         if (serviceBitmapShader != null && (key_chat_serviceText == key || key_chat_serviceLink == key || key_chat_serviceIcon == key
                 || key_chat_stickerReplyLine == key || key_chat_stickerReplyNameText == key || key_chat_stickerReplyMessageText == key)) {
