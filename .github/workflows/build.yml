@@ -601,7 +601,13 @@ jobs:
                   try {
                       long ts = System.currentTimeMillis() / 1000;
                       if (status instanceof TLRPC.TL_userStatusOffline) {
-                          ts = ((TLRPC.TL_userStatusOffline) status).was_online;
+                          try {
+                              java.lang.reflect.Field f;
+                              try { f = status.getClass().getField("was_online"); }
+                              catch (NoSuchFieldException e) { f = status.getClass().getField("wasOnline"); }
+                              long wo = ((Number) f.get(status)).longValue();
+                              if (wo > 0) ts = wo;
+                          } catch (Throwable ignore) { }
                       }
                       ContentValues v = new ContentValues();
                       v.put("user_id", userId);
