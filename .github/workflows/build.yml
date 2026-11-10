@@ -200,10 +200,21 @@ jobs:
           tg = "TMessagesProj/src/main/java/org/telegram/tgnet"
           tlrpc = open(tg + "/TLRPC.java", encoding="utf-8").read()
 
-          def has(name):
-              ok = re.search(r'class\s+' + name + r'\b', tlrpc) is not None
-              print(("  найден    " if ok else "  НЕ найден ") + name)
-              return ok
+          import glob
+          SRC = {"TLRPC": tlrpc}
+          for _f in glob.glob(tg + "/tl/*.java"):
+              SRC[os.path.basename(_f)[:-5]] = open(_f, encoding="utf-8").read()
+          Q = {}
+          def has(name, only=None):
+              for holder, text in SRC.items():
+                  if only and holder != only:
+                      continue
+                  if re.search(r'class\s+' + name + r'\b', text):
+                      Q[name] = ("TLRPC." if holder == "TLRPC" else "org.telegram.tgnet.tl." + holder + ".") + name
+                      print("  найден    " + Q[name])
+                      return True
+              print("  НЕ найден " + name)
+              return False
 
           cases = []
           offline_impl = "private static void sendOffline() { }"
@@ -220,20 +231,21 @@ jobs:
           # --- истории
           for n in ("TL_stories_readStories", "TL_stories_incrementStoryViews"):
               if has(n):
-                  cases.append('if (req instanceof TLRPC.%s) return on(KEY_STORIES);' % n)
+                  cases.append('if (req instanceof %s) return on(KEY_STORIES);' % Q[n])
 
           # --- «печатает»
           if has("TL_messages_setTyping"):
               cases.append('if (req instanceof TLRPC.TL_messages_setTyping) return on(KEY_TYPING);')
 
           # --- «онлайн»
-          if has("TL_account_updateStatus"):
-              cases.append('if (req instanceof TLRPC.TL_account_updateStatus) { if (on(KEY_ONLINE)) { ((TLRPC.TL_account_updateStatus) req).offline = true; } return false; }')
+          if has("updateStatus", "TL_account"):
+              ST = Q["updateStatus"]
+              cases.append('if (req instanceof %s) { if (on(KEY_ONLINE)) { ((%s) req).offline = true; } return false; }' % (ST, ST))
               offline_impl = """private static void sendOffline() {
                   AndroidUtilities.runOnUIThread(new Runnable() {
                       @Override
                       public void run() {
-                          TLRPC.TL_account_updateStatus r = new TLRPC.TL_account_updateStatus();
+                          org.telegram.tgnet.tl.TL_account.updateStatus r = new org.telegram.tgnet.tl.TL_account.updateStatus();
                           r.offline = true;
                           ConnectionsManager.getInstance(UserConfig.selectedAccount).sendRequest(r, new RequestDelegate() {
                               @Override
@@ -556,24 +568,35 @@ jobs:
           tg = "TMessagesProj/src/main/java/org/telegram/tgnet"
           tlrpc = open(tg + "/TLRPC.java", encoding="utf-8").read()
 
-          def has(name):
-              ok = re.search(r'class\s+' + name + r'\b', tlrpc) is not None
-              print(("  найден    " if ok else "  НЕ найден ") + name)
-              return ok
+          import glob
+          SRC = {"TLRPC": tlrpc}
+          for _f in glob.glob(tg + "/tl/*.java"):
+              SRC[os.path.basename(_f)[:-5]] = open(_f, encoding="utf-8").read()
+          Q = {}
+          def has(name, only=None):
+              for holder, text in SRC.items():
+                  if only and holder != only:
+                      continue
+                  if re.search(r'class\s+' + name + r'\b', text):
+                      Q[name] = ("TLRPC." if holder == "TLRPC" else "org.telegram.tgnet.tl." + holder + ".") + name
+                      print("  найден    " + Q[name])
+                      return True
+              print("  НЕ найден " + name)
+              return False
 
           cases = []
           if has("TL_updateDeleteMessages"):
-              cases.append('if (u instanceof TLRPC.TL_updateDeleteMessages) { if (keepDeleted) { recordDeleted(0, ((TLRPC.TL_updateDeleteMessages) u).messages); updates.remove(i--); } continue; }')
+              cases.append('if (u instanceof org.telegram.tgnet.tl.TL_update.TL_updateDeleteMessages) { if (keepDeleted) { recordDeleted(0, ((org.telegram.tgnet.tl.TL_update.TL_updateDeleteMessages) u).messages); updates.remove(i--); } continue; }')
           if has("TL_updateDeleteChannelMessages"):
-              cases.append('if (u instanceof TLRPC.TL_updateDeleteChannelMessages) { TLRPC.TL_updateDeleteChannelMessages d = (TLRPC.TL_updateDeleteChannelMessages) u; long did = -(long) d.channel_id; if (keepDeleted && !isException(did)) { recordDeleted(did, d.messages); updates.remove(i--); } continue; }')
+              cases.append('if (u instanceof org.telegram.tgnet.tl.TL_update.TL_updateDeleteChannelMessages) { org.telegram.tgnet.tl.TL_update.TL_updateDeleteChannelMessages d = (org.telegram.tgnet.tl.TL_update.TL_updateDeleteChannelMessages) u; long did = -(long) d.channel_id; if (keepDeleted && !isException(did)) { recordDeleted(did, d.messages); updates.remove(i--); } continue; }')
           if has("TL_updateEditMessage"):
-              cases.append('if (u instanceof TLRPC.TL_updateEditMessage) { if (keepEdits) { recordEdit(((TLRPC.TL_updateEditMessage) u).message); } continue; }')
+              cases.append('if (u instanceof org.telegram.tgnet.tl.TL_update.TL_updateEditMessage) { if (keepEdits) { recordEdit(((org.telegram.tgnet.tl.TL_update.TL_updateEditMessage) u).message); } continue; }')
           if has("TL_updateEditChannelMessage"):
-              cases.append('if (u instanceof TLRPC.TL_updateEditChannelMessage) { if (keepEdits) { recordEdit(((TLRPC.TL_updateEditChannelMessage) u).message); } continue; }')
+              cases.append('if (u instanceof org.telegram.tgnet.tl.TL_update.TL_updateEditChannelMessage) { if (keepEdits) { recordEdit(((org.telegram.tgnet.tl.TL_update.TL_updateEditChannelMessage) u).message); } continue; }')
 
           status_impl = "private static void recordOnline(long userId, Object status) { }"
           if has("TL_updateUserStatus") and has("TL_userStatusOffline"):
-              cases.append('if (u instanceof TLRPC.TL_updateUserStatus) { if (keepOnline) { recordOnline(((TLRPC.TL_updateUserStatus) u).user_id, ((TLRPC.TL_updateUserStatus) u).status); } continue; }')
+              cases.append('if (u instanceof org.telegram.tgnet.tl.TL_update.TL_updateUserStatus) { if (keepOnline) { recordOnline(((org.telegram.tgnet.tl.TL_update.TL_updateUserStatus) u).user_id, ((org.telegram.tgnet.tl.TL_update.TL_updateUserStatus) u).status); } continue; }')
               status_impl = """private static void recordOnline(long userId, Object status) {
                   try {
                       long ts = System.currentTimeMillis() / 1000;
@@ -1795,6 +1818,74 @@ jobs:
           report("✅ Пункт «%s» добавлен в настройки отдельной группой" % TITLE)
           PY
 
+      - name: Канал FluxGram (пункт в настройках ниже «Настройки FluxGram»)
+        run: |
+          python3 - <<'PY'
+          import os
+          sa = "TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java"
+          if not os.path.exists(sa):
+              print("::warning::нет SettingsActivity.java, канал не добавлен"); raise SystemExit(0)
+          s = open(sa, encoding="utf-8").read()
+          if "https://t.me/FluxGraam" in s:
+              print("канал уже добавлен"); raise SystemExit(0)
+          title = "Настройки FluxGram"
+          anchor = None
+          for line in s.split("\n"):
+              if "SettingCell.Factory.of(28," in line and title in line:
+                  anchor = line; break
+          if anchor is None:
+              print("::warning::не нашёл пункт «Настройки FluxGram» (id 28), канал не добавлен"); raise SystemExit(0)
+          ind = anchor[:len(anchor) - len(anchor.lstrip())]
+          chan = ('\n' + ind + 'items.add(SettingCell.Factory.of(29, 0xFF2AABEE, 0xFF229ED9, R.drawable.settings_fluxgram, "Канал FluxGram"));')
+          s = s.replace(anchor, anchor + chan, 1)
+          mc = s.find("case 28: {")
+          if mc < 0:
+              print("::warning::нет case 28, клик по каналу не добавлен"); raise SystemExit(0)
+          ls = s.rfind("\n", 0, mc) + 1
+          ind2 = s[ls:mc]
+          click = ('\n' + ind2 + 'case 29: {' +
+                   '\n' + ind2 + '    Browser.openUrl(getParentActivity(), "https://t.me/FluxGraam");' +
+                   '\n' + ind2 + '    break;' +
+                   '\n' + ind2 + '}')
+          s = s[:ls] + click.lstrip("\n") + "\n" + s[ls:]
+          open(sa, "w", encoding="utf-8").write(s)
+          print("✅ Канал FluxGram добавлен")
+          PY
+
+      - name: Лимит аккаунтов до 50 (пункт 7)
+        run: |
+          python3 - <<'PY'
+          import glob, re
+          for p in glob.glob("TMessagesProj/src/main/java/**/UserConfig.java", recursive=True):
+              s = open(p, encoding="utf-8").read()
+              n = re.sub(r'MAX_ACCOUNT_COUNT\s*=\s*\d+;', 'MAX_ACCOUNT_COUNT = 50;', s, count=1)
+              n = re.sub(r'MAX_ACCOUNT_DEFAULT_COUNT\s*=\s*\d+;', 'MAX_ACCOUNT_DEFAULT_COUNT = 50;', n, count=1)
+              n = n.replace("return hasPremiumOnAccounts() ? 5 : 3;", "return MAX_ACCOUNT_COUNT;")
+              if n != s:
+                  open(p, "w", encoding="utf-8").write(n); print("✅ лимит аккаунтов в", p)
+          PY
+
+      - name: Скрыть Premium в настройках (пункт 6)
+        run: |
+          python3 - <<'PY'
+          import os
+          sa = "TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java"
+          if not os.path.exists(sa):
+              raise SystemExit(0)
+          s = open(sa, encoding="utf-8").read()
+          old = "        if (!getMessagesController().premiumFeaturesBlocked()) {\n            items.add(SettingCell.Factory.of(11,"
+          if old not in s:
+              print("::warning::блок Premium не найден"); raise SystemExit(0)
+          s = s.replace(old, old.replace("premiumFeaturesBlocked()) {", "premiumFeaturesBlocked() && !fluxHidePremium()) {"), 1)
+          helper = ("\n    private static boolean fluxHidePremium() {\n"
+                    "        return org.telegram.messenger.ApplicationLoader.applicationContext\n"
+                    "                .getSharedPreferences(\"fluxgram\", 0).getBoolean(\"hide_premium\", true);\n    }\n")
+          i = s.index("{", s.index("public class SettingsActivity")) + 1
+          s = s[:i] + helper + s[i:]
+          open(sa, "w", encoding="utf-8").write(s)
+          print("✅ Premium скрыт по флагу hide_premium")
+          PY
+
       - name: API ключи (необязательно, из secrets APP_ID / APP_HASH)
         env:
           S_APP_ID: ${{ secrets.APP_ID }}
@@ -2007,3 +2098,32 @@ jobs:
           name: install-test
           path: install.log
           if-no-files-found: ignore
+
+  # Публикация собранного APK в GitHub Releases.
+  # Приложение может проверять обновления через https://api.github.com/repos/<owner>/<repo>/releases/latest
+  release:
+    needs: build
+    if: ${{ success() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Скачать APK
+        uses: actions/download-artifact@v4
+        with:
+          name: apk
+          path: apk
+
+      - name: Создать GitHub Release и прикрепить APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_NO: ${{ github.run_number }}
+        run: |
+          TAG="fluxgram-v1.0.${RUN_NO}"
+          NOTES="Сборка FluxGram #${RUN_NO} (commit ${GITHUB_SHA::7}). Файлы: $(ls apk | tr '\n' ' ')"
+          gh release create "$TAG" apk/*.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "FluxGram ${TAG}" \
+            --notes "$NOTES" \
+            --latest
