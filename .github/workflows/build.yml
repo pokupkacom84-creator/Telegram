@@ -584,7 +584,7 @@ jobs:
                   try {
                       long ts = System.currentTimeMillis() / 1000;
                       if (status instanceof TLRPC.TL_userStatusOffline) {
-                          ts = ((TLRPC.TL_userStatusOffline) status).was_online;
+                          ts = ((TLRPC.TL_userStatusOffline) status).expires;
                       }
                       ContentValues v = new ContentValues();
                       v.put("user_id", userId);
