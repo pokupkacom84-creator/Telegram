@@ -414,6 +414,710 @@ jobs:
           print("файлов strings:", len(files), " замен Telegram ->", NAME, ":", total)
           PY
 
+      - name: Иконка приложения (замена на вашу картинку)
+        run: |
+          python3 -m pip install --quiet --break-system-packages pillow
+          python3 - <<'PY'
+          import base64, glob, io, os
+          from PIL import Image, ImageDraw
+
+          B64 = """
+          /9j/4AAQSkZJRgABAQIAJQAlAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYn
+          KSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo
+          KCgoKCgoKCj/wgARCAH0AfQDASIAAhEBAxEB/8QAHAABAAICAwEAAAAAAAAAAAAAAAYHBAUBAwgC/8QAFAEBAAAAAAAAAAAAAAAA
+          AAAAAP/aAAwDAQACEAMQAAABrkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAkJHu61pqVPNJaKMjFqVWAAAAAAAAAAAAAAAAAAAAAAAAAD6PlLp2VHOLR7DS7pgmcreyACnYP
+          t9QAAAAAAAAAAAAAAAAAAAAAAAHfMiDbe3ZKVvOdgAHGpqMnME+brOjZgxMuKlIcAAAAAAAAAAAAAAAAAAAAAASK3ioZ3PRjZIAC
+          PG9ruE6M7ZVm20fHeACtLLpMiIAAAAAAAAAAAAAAAAAAAAAJTaNCj0zz53mBbCMSQ+8WMVOTCv8Ajk4svOsEAAAec7588AAAAAAA
+          AAAAAAAAAAAAAAAAADIxwB2XFDLkPsAAAELpmxa6AAAAAAAAAAAAAAAAAAAAAAAAAAEmjI9E7HzjcRLAAD4KNjXd0gAAAAAAAAAA
+          AAAAAAAAAAAAAAAADngWPZ/mmRl7tZsxot7ASowAAAAAAAAAAAAAAAAAAAAAAAAAAAAAZdw0mPTNLRzCAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/EACUQAAICAQQCAgIDAAAAAAAAAAMEAgUBAAYTUBAgEjARoBUiMf/a
+          AAgBAQABBQL9g0QiGmntxkug7fQhC9rf49juU6dxrSe21x6AEYIeN5SxwdssodqSe2Zy0nWKKe27i/Ox7OMcyynQOMaT2+mDUIxh
+          Hw20FQULhuwb825eez7FOuab0ntmONKprqR9LPcAl9LAbunEExJA8NF4VuvCIhpp7cZLpKlTV9n7BdGFpcsPaqKstgRVcawfO5i8
+          VR1qdM41pPba49BCMEPWUsQjabixHRCTLOkp5vZEOAh+m8i/16ulrc2J061RT6LO1XQxZWbD8tUVJljUcYjH13SXkturorTFcRW3
+          SZ9mDjXFabimTWc5lnVFR/n6Hi87nWqvMq6V3MWOlbxFjUc4li0vAJ6dcO6TWMZzmipOD6LMvBX9iM5RY8DhIk6Ominj6N2F+FX2
+          m3HllDRziWPo3kX8n7WptzIZSbC6L33EXlt+2UZKoWouRPY9ZZxGJiZKbt/81T7gzHUJYnHzeF4aruqq2NXyRdC6LxvAvxR7tVgq
+          pqi6E943M7Bp3vZtsTh+qL//xAAUEQEAAAAAAAAAAAAAAAAAAACg/9oACAEDAQE/AQAf/8QAFBEBAAAAAAAAAAAAAAAAAAAAoP/a
+          AAgBAgEBPwEAH//EADkQAAIBAgIGBggEBwAAAAAAAAECAwARBDESIUFQUVIQICMwcZETIjIzYWLB0UJToLEFQ4GisuHx/9oACAEB
+          AAY/Av1BujEjO3BRegcQywrwzNWZGkPMzUuhcwv7N9nw30CsWgnM+qr4lzK3AahWjDGqLwUdOGX8RYne9sPEz+FXxcoQcqazXYwj
+          S5jrPWWMfy03pZQSeAoF1EKfPn5UDKDO/wA2XlQVAFA2Dp9JO4UfvQh/h8QRNrML2HUxL/Pby1by7CFivMdQoHFy6Xyp96th4lT4
+          7eqY8LaaTj+EfeiWYnmc5LQihXxO09MsvIpbeGjEjO3BRegcQywrwzNXEfpH5pNfWvO+vYozNFfdwcg2+NX9iAe0/wBqEUC6KDqS
+          cXIXd1xHoJzPqq+JczNwyFaMKKi8FHWLMQFG00Y8B6x/MOX9KLyMWY5k0JZrrhx/dSxxqFRcgOrhofFjuwjS0Yk9o12MI0uY6z3F
+          nOnLsRc67VrR7EGXQs+LFofwrzf6oBRYDYOsy/lqF+v13ZJ6RC0b52zFepOFbg+rrGSZwiDaaMeCvGnOczVybk9C4jGrqzWM/XuJ
+          5eZyd3dhM6jhs8qtiYlccV1Gve+jbhJqq6kEfCikXazcBkK08Q+lwGwdFhrNDEYwXlzVOXuMRJtCG28iIpXQHPRNukJGpZjkBQln
+          s2I/w7nQ/McD671IxCWZspeFXU3B29zh4eVS3n/ze2j7yDkOzwr0kDXG0bR3E/BfV3uJIHKt+9BH7PEcvHw6xJyFPIc3YtvjVQix
+          5uNkv3oMpBU5EdTEt8uj56t92Hrw7UP0rTga/EbR0xRc738t+CSByrChHJaOfhsbw6FWI6UcYtf47+0HnlZOUubfpRv/xAAqEAEA
+          AQMBBQgDAQAAAAAAAAABEQAhMWFBUFFxoRAgMIGRsdHwweHxoP/aAAgBAQABPyH/AEGkHniFffZOxbrUj5ygekVfkVVkjK31Pg2n
+          +Wo37te2uToh2nbgHIP2b3ml9qLHNwVFfaIcHWolg/7rjy70rLAPNv7RvQOx2AlammW3+j1io1Btt+ms1hIkEB2oNj8t9AbanxTL
+          OI7Dl3L4yKDpY6G8kyQf2Wp51yz1fquADILubl7igS2KeDg3/Ry9a8vO84B+KhxGVy8XtJr4QpVVbru8U98Qr6iJ2LdagoJ9Jigg
+          gx3YBBk3XKKYF1nqbazsnB01UGnZTbq69yEjAn1l6Du6KW2j+Wo3hJ/vXLlw7xU0lSAqKhhSs5NvOmP/ACuVqchs7dJprRsgjAO7
+          bDlF0Pd3Yv0QTzfAa1GsH/dceXgK7BuurgVhBOxj5eyXTPhdbw91CENAEAd6Gm27BASB+KG09ahhJretDJJju5IUJUWcB6Vw9+VO
+          XIlVlezlmNnX4eBdyQnlNt3LEa459S1Q3F7/AFe1RBdbD3460JY8KkatnO0l/V/HtUpK5HJOwmKjAG2jhOQ41Ovt4F0I80RB13kV
+          iYCh59q+DgEq0OSy205NdfBs5vA6H6G9S8W+WPDQ1oSQEgZE8GEHI+aN7D7lW6ergoT5PF4J4E+G6HyL9Z3uNR+g4JtqHPjG322d
+          5Q4CVrMqDzZ3wKhUJhKmcx7Q/LnQQ0lEidy7MLF9Nd9lL23WNeBoLH4Sy8E7YYb+kHym/OCEbCcE2lEcy/0aUsEtYE5eFN46b9GG
+          TNa38T0T/lG//9oADAMBAAIAAwAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARgwgAAAAAAAAAAAAAAAAAAAAAAAAAQDxzzygAAAAAAAAAAAAAAAAAAAAAAAQwzygRzgA
+          AAAAAAAAAAAAAAAAAAAAABxzzyAxzzgAAAAAAAAAAAAAAAAAAAAABDDSjQRzzyAAAAAAAAAAAAAAAAAAAAAAAABABDzzzygAAAAA
+          AAAAAAAAAAAAAAAAAAAAABjzzwgAAAAAAAAAAAAAAAAAAAAAAAAAAABDywAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSgAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/xAAUEQEAAAAAAAAAAAAAAAAAAACg/9oACAEDAQE/EAAf
+          /8QAFBEBAAAAAAAAAAAAAAAAAAAAoP/aAAgBAgEBPxAAH//EACgQAQABAgUEAgIDAQAAAAAAAAERITEAQVFhcSBQgZEQoTCxoMHw
+          4f/aAAgBAQABPxD+QbbSY3kgyw4gaqhTkh5kaYdHyPAwYPWClJmTESM4kR0dnvISwXxciGrDqCQbgmBCNVkLajLmTjA03bErqxd3
+          fkAhTswI/fq7vE5WPZ79iYluFX0i6nBhBsymtqf0B1VACzR1d0WPjKEaAVcCVJGchsbtsCFQiwuwpGywBDUHk0AofIaHMK15S2MD
+          yZa9la8Hkth6IX3LVY9HcnzIBg9Q8Eu2AbsUfChKcHLEY/FRhuz5HoRKASqwBgpUlXvku2QfTAhoSFtwQTeDE3pVxGw4hXVubtYy
+          +YG4rWcrH1hm1Eq3Xt9itDeSDLfE+RhaHOSHmRpiGysoKdSEeQnfAAAAgDLp/wB9gehuwb4R+jBXD2cKG2eMsJrdzX+hdyEPFUuL
+          NLqzXor2J+YHbUEsF8XOwrwagkG4Jgg6VZT2gZcycYLHLYl3Yu7vU8pQwJdVoGL+hrZ3Lt1NkxOgYFG64Ejblhro5HwKzBK8HQH+
+          rOb0weJOQD9sSlKVNZhWlDVoA3snnctran9AfgmhkhFaLtvNdBwnu490S/sfEW+EaDmyPLM+zJBVPPAwFQAKAadVdg9FpiX2jx2w
+          xuxIJGAYGiEkyrr5nO/QsXhcACCiRLPTkD9YnQLroFXEzwkKC25d8DSuLkN1W78MkSjkwNy099EAACA64hkV3uHgg7dJjkwm8yL1
+          iL1UUciMp4wlvhM93EfsZEBqJfCVVy8Ad00VpC4PSSYaJytHN2Kr8CtMPKmgBm4Op5hXRyXSW5W64HqO3r7R3J0hBspCAa+fkhj5
+          8VgMSPzCgnLVr8Ckr+ChSdapE+/d3VpYjp3UzG480JC8cNIVES5+GwQBM0BPt77shuYMldc2cWea4K7SE/QJ+nJT8FeDaeIHd6gS
+          FiuYshs/vCaEIazzW35VN4nqF8u7ICVxnHw6sv33hyipRCOpizLI06Ycmyus3BtKKJWRKJ0QJJteWUffx3t6mWpErp/yczMi7Mfp
+          kTvZyX5GCJo1ZPfHT3NK3VgmjhsYsTqNW57q6TC4BEACVcsFjTCzPGsygnOHKO+oCIGRLmE6eBQrlD+KN//Z
+          """
+          src = Image.open(io.BytesIO(base64.b64decode(B64))).convert("RGBA")
+          BG = (23, 23, 23, 255)
+
+          files = []
+          for ext in ("png", "webp"):
+              files += glob.glob("**/res/mipmap-*/*." + ext, recursive=True)
+
+          n = 0
+          for f in files:
+              if f.startswith(".git") or "/build/" in f or "/jni/" in f or "anydpi" in f:
+                  continue
+              low = os.path.basename(f).lower()
+              if "monochrome" in low:
+                  continue
+              try:
+                  size = Image.open(f).size
+              except Exception:
+                  continue
+              w, h = size
+              if "background" in low:
+                  img = Image.new("RGBA", size, BG)
+              else:
+                  img = src.resize(size, Image.LANCZOS)
+                  if "round" in low:
+                      mask = Image.new("L", size, 0)
+                      ImageDraw.Draw(mask).ellipse((0, 0, w - 1, h - 1), fill=255)
+                      img.putalpha(mask)
+              img.save(f, "WEBP" if f.endswith(".webp") else "PNG")
+              n += 1
+
+          print("иконок заменено:", n)
+          if n == 0:
+              print("::warning::mipmap-иконки не найдены, иконка не заменена")
+          PY
+
+      - name: Заголовок «Telegram» → FluxGram (код + языковой пакет)
+        if: ${{ env.REBRAND != 'false' }}
+        run: |
+          python3 - <<'PY'
+          import re, glob, os
+
+          NAME = os.environ["APP_NAME"]
+
+          # Заголовок списка чатов берётся из языкового пакета с сервера (ключ AppName = "Telegram"),
+          # поэтому подменяем сами вызовы на строку с названием приложения.
+          call = re.compile(
+              r'(?:LocaleController\s*\.\s*)?getString\(\s*'
+              r'(?:"(?:AppName|ApplicationName|AppNameBeta)"\s*,\s*)?'
+              r'R\.string\.(?:AppName|ApplicationName|AppNameBeta)\s*\)')
+          lit = re.compile(r'(setTitle\(\s*)"Telegram(?: Beta)?"')
+
+          total = 0
+          for f in glob.glob("TMessagesProj/src/main/java/**/*.java", recursive=True):
+              s = open(f, encoding="utf-8").read()
+              n, c1 = call.subn('"' + NAME + '"', s)
+              n, c2 = lit.subn(lambda m: m.group(1) + '"' + NAME + '"', n)
+              if c1 + c2:
+                  open(f, "w", encoding="utf-8").write(n)
+                  total += c1 + c2
+                  print("  %s: %d" % (f.split("/")[-1], c1 + c2))
+          print("Подменено заголовков в коде:", total)
+          PY
+
+      - name: Режим шпиона (SpyMode + хук в MessagesController)
+        run: |
+          python3 - <<'PY'
+          import re, os, sys
+
+          tg = "TMessagesProj/src/main/java/org/telegram/tgnet"
+          tlrpc = open(tg + "/TLRPC.java", encoding="utf-8").read()
+
+          def has(name):
+              ok = re.search(r'class\s+' + name + r'\b', tlrpc) is not None
+              print(("  найден    " if ok else "  НЕ найден ") + name)
+              return ok
+
+          cases = []
+          if has("TL_updateDeleteMessages"):
+              cases.append('if (u instanceof TLRPC.TL_updateDeleteMessages) { if (keepDeleted) { recordDeleted(0, ((TLRPC.TL_updateDeleteMessages) u).messages); updates.remove(i--); } continue; }')
+          if has("TL_updateDeleteChannelMessages"):
+              cases.append('if (u instanceof TLRPC.TL_updateDeleteChannelMessages) { TLRPC.TL_updateDeleteChannelMessages d = (TLRPC.TL_updateDeleteChannelMessages) u; long did = -(long) d.channel_id; if (keepDeleted && !isException(did)) { recordDeleted(did, d.messages); updates.remove(i--); } continue; }')
+          if has("TL_updateEditMessage"):
+              cases.append('if (u instanceof TLRPC.TL_updateEditMessage) { if (keepEdits) { recordEdit(((TLRPC.TL_updateEditMessage) u).message); } continue; }')
+          if has("TL_updateEditChannelMessage"):
+              cases.append('if (u instanceof TLRPC.TL_updateEditChannelMessage) { if (keepEdits) { recordEdit(((TLRPC.TL_updateEditChannelMessage) u).message); } continue; }')
+
+          status_impl = "private static void recordOnline(long userId, Object status) { }"
+          if has("TL_updateUserStatus") and has("TL_userStatusOffline"):
+              cases.append('if (u instanceof TLRPC.TL_updateUserStatus) { if (keepOnline) { recordOnline(((TLRPC.TL_updateUserStatus) u).user_id, ((TLRPC.TL_updateUserStatus) u).status); } continue; }')
+              status_impl = """private static void recordOnline(long userId, Object status) {
+                  try {
+                      long ts = System.currentTimeMillis() / 1000;
+                      if (status instanceof TLRPC.TL_userStatusOffline) {
+                          ts = ((TLRPC.TL_userStatusOffline) status).was_online;
+                      }
+                      ContentValues v = new ContentValues();
+                      v.put("user_id", userId);
+                      v.put("ts", ts);
+                      db().insertWithOnConflict("online", null, v, SQLiteDatabase.CONFLICT_REPLACE);
+                  } catch (Throwable ignore) { }
+              }"""
+
+          java = """package org.telegram.messenger;
+
+          import android.content.ContentValues;
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.database.sqlite.SQLiteDatabase;
+          import android.database.sqlite.SQLiteOpenHelper;
+
+          import org.telegram.tgnet.TLRPC;
+          import org.telegram.ui.ActionBar.AlertDialog;
+
+          import java.io.File;
+          import java.io.FileInputStream;
+          import java.io.FileOutputStream;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.util.ArrayList;
+          import java.util.Arrays;
+          import java.util.Comparator;
+          import java.util.HashSet;
+          import java.util.List;
+          import java.util.Set;
+
+          public class SpyMode {
+              public static final String KEY_DELETED = "spy_deleted";
+              public static final String KEY_EDITS = "spy_edits";
+              public static final String KEY_ATTACH = "spy_attach";
+              public static final String KEY_READ_DATE = "spy_read_date";
+              public static final String KEY_LAST_ONLINE = "spy_last_online";
+              public static final String KEY_LIMIT = "spy_limit_index";
+              public static final String KEY_FOLDER = "spy_folder";
+              public static final String KEY_EXCEPTIONS = "spy_exceptions";
+
+              public static final String[] LIMIT_TITLES = {"300 MB", "1 GB", "2 GB", "5 GB", "16 GB", "∞"};
+              private static final long MB = 1024L * 1024L;
+              private static final long[] LIMITS = {300L * MB, 1024L * MB, 2048L * MB, 5120L * MB, 16384L * MB, -1L};
+
+              private static SQLiteOpenHelper helper;
+
+              private static SharedPreferences prefs() {
+                  Context c = ApplicationLoader.applicationContext;
+                  return c == null ? null : c.getSharedPreferences("spymode", Context.MODE_PRIVATE);
+              }
+
+              public static boolean get(String key) {
+                  SharedPreferences p = prefs();
+                  return p == null || p.getBoolean(key, true);
+              }
+
+              public static void set(String key, boolean value) {
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putBoolean(key, value).apply();
+                  }
+              }
+
+              public static int getLimit() {
+                  SharedPreferences p = prefs();
+                  return p == null ? LIMITS.length - 1 : p.getInt(KEY_LIMIT, LIMITS.length - 1);
+              }
+
+              public static void setLimit(int index) {
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putInt(KEY_LIMIT, index).apply();
+                  }
+                  trim();
+              }
+
+              public static String folderName() {
+                  SharedPreferences p = prefs();
+                  return p == null ? "Saved Attachments" : p.getString(KEY_FOLDER, "Saved Attachments");
+              }
+
+              public static void setFolderName(String name) {
+                  SharedPreferences p = prefs();
+                  if (p != null && name != null && name.trim().length() > 0) {
+                      p.edit().putString(KEY_FOLDER, name.trim().replace("/", "_")).apply();
+                  }
+              }
+
+              public static File attachmentsDir() {
+                  Context c = ApplicationLoader.applicationContext;
+                  File base = c.getExternalFilesDir(null);
+                  if (base == null) {
+                      base = c.getFilesDir();
+                  }
+                  File d = new File(base, folderName());
+                  if (!d.exists()) {
+                      d.mkdirs();
+                  }
+                  return d;
+              }
+
+              private static long size(File f) {
+                  if (f == null || !f.exists()) return 0;
+                  if (f.isFile()) return f.length();
+                  long total = 0;
+                  File[] list = f.listFiles();
+                  if (list != null) {
+                      for (File x : list) {
+                          total += size(x);
+                      }
+                  }
+                  return total;
+              }
+
+              public static long usedBytes() {
+                  return size(attachmentsDir());
+              }
+
+              /** удаляет самые старые вложения, если превышен выбранный лимит */
+              public static void trim() {
+                  try {
+                      int idx = getLimit();
+                      if (idx < 0 || idx >= LIMITS.length || LIMITS[idx] < 0) return;
+                      File[] files = attachmentsDir().listFiles();
+                      if (files == null) return;
+                      Arrays.sort(files, new Comparator<File>() {
+                          @Override
+                          public int compare(File a, File b) {
+                              return Long.compare(a.lastModified(), b.lastModified());
+                          }
+                      });
+                      long total = usedBytes();
+                      for (File f : files) {
+                          if (total <= LIMITS[idx]) break;
+                          long len = size(f);
+                          if (deleteRec(f)) {
+                              total -= len;
+                          }
+                      }
+                  } catch (Throwable ignore) { }
+              }
+
+              private static boolean deleteRec(File f) {
+                  File[] list = f.listFiles();
+                  if (list != null) {
+                      for (File x : list) {
+                          deleteRec(x);
+                      }
+                  }
+                  return f.delete();
+              }
+
+              // ---- исключения (ID диалогов) ----
+              public static Set<String> getExceptions() {
+                  SharedPreferences p = prefs();
+                  Set<String> s = p == null ? null : p.getStringSet(KEY_EXCEPTIONS, null);
+                  return s == null ? new HashSet<String>() : new HashSet<String>(s);
+              }
+
+              public static boolean isException(long dialogId) {
+                  return getExceptions().contains(String.valueOf(dialogId));
+              }
+
+              /** true — добавлен, false — убран */
+              public static boolean toggleException(long dialogId) {
+                  Set<String> s = getExceptions();
+                  String k = String.valueOf(dialogId);
+                  boolean added = !s.remove(k);
+                  if (added) {
+                      s.add(k);
+                  }
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putStringSet(KEY_EXCEPTIONS, s).apply();
+                  }
+                  return added;
+              }
+
+              // ---- база данных ----
+              private static synchronized SQLiteDatabase db() {
+                  if (helper == null) {
+                      helper = new SQLiteOpenHelper(ApplicationLoader.applicationContext, "spy.db", null, 1) {
+                          @Override
+                          public void onCreate(SQLiteDatabase d) {
+                              d.execSQL("CREATE TABLE IF NOT EXISTS deleted(dialog_id INTEGER, msg_id INTEGER, date INTEGER, PRIMARY KEY(dialog_id, msg_id))");
+                              d.execSQL("CREATE TABLE IF NOT EXISTS edits(dialog_id INTEGER, msg_id INTEGER, date INTEGER, text TEXT)");
+                              d.execSQL("CREATE TABLE IF NOT EXISTS online(user_id INTEGER PRIMARY KEY, ts INTEGER)");
+                          }
+
+                          @Override
+                          public void onUpgrade(SQLiteDatabase d, int o, int n) { }
+                      };
+                  }
+                  return helper.getWritableDatabase();
+              }
+
+              private static File dbFile() {
+                  return ApplicationLoader.applicationContext.getDatabasePath("spy.db");
+              }
+
+              public static synchronized void exportTo(OutputStream os) throws Exception {
+                  db();
+                  helper.close();
+                  helper = null;
+                  InputStream in = new FileInputStream(dbFile());
+                  try {
+                      byte[] buf = new byte[16384];
+                      int r;
+                      while ((r = in.read(buf)) > 0) {
+                          os.write(buf, 0, r);
+                      }
+                  } finally {
+                      in.close();
+                      os.close();
+                  }
+              }
+
+              public static synchronized void importFrom(InputStream in) throws Exception {
+                  if (helper != null) {
+                      helper.close();
+                      helper = null;
+                  }
+                  DELETED.clear();
+                  deletedLoaded = false;
+                  File f = dbFile();
+                  f.getParentFile().mkdirs();
+                  OutputStream os = new FileOutputStream(f);
+                  try {
+                      byte[] buf = new byte[16384];
+                      int r;
+                      while ((r = in.read(buf)) > 0) {
+                          os.write(buf, 0, r);
+                      }
+                  } finally {
+                      os.close();
+                      in.close();
+                  }
+              }
+
+              public static synchronized void clear() {
+                  try {
+                      SQLiteDatabase d = db();
+                      d.delete("deleted", null, null);
+                      d.delete("edits", null, null);
+                      d.delete("online", null, null);
+                      DELETED.clear();
+                  } catch (Throwable ignore) { }
+                  deleteRecContents(attachmentsDir());
+              }
+
+              private static void deleteRecContents(File dir) {
+                  File[] list = dir.listFiles();
+                  if (list != null) {
+                      for (File x : list) {
+                          deleteRec(x);
+                      }
+                  }
+              }
+
+              public static long lastOnline(long userId) {
+                  try {
+                      android.database.Cursor c = db().rawQuery("SELECT ts FROM online WHERE user_id = ?", new String[]{String.valueOf(userId)});
+                      try {
+                          return c.moveToFirst() ? c.getLong(0) : 0;
+                      } finally {
+                          c.close();
+                      }
+                  } catch (Throwable e) {
+                      return 0;
+                  }
+              }
+
+              private static final Set<String> DELETED = java.util.Collections.synchronizedSet(new HashSet<String>());
+              private static boolean deletedLoaded;
+
+              private static synchronized void loadDeleted() {
+                  if (deletedLoaded) return;
+                  try {
+                      android.database.Cursor c = db().rawQuery("SELECT dialog_id, msg_id FROM deleted", null);
+                      try {
+                          while (c.moveToNext()) {
+                              DELETED.add(c.getLong(0) + "_" + c.getLong(1));
+                          }
+                      } finally {
+                          c.close();
+                      }
+                      deletedLoaded = true;
+                  } catch (Throwable ignore) { }
+              }
+
+              private static long keyDialog(MessageObject mo) {
+                  return mo.messageOwner.peer_id instanceof TLRPC.TL_peerChannel ? mo.getDialogId() : 0;
+              }
+
+              public static boolean isDeleted(MessageObject mo) {
+                  try {
+                      if (mo == null || mo.messageOwner == null) return false;
+                      loadDeleted();
+                      return DELETED.contains(keyDialog(mo) + "_" + mo.getId());
+                  } catch (Throwable e) {
+                      return false;
+                  }
+              }
+
+              /** добавляет пометку к времени сообщения, если оно было удалено */
+              public static String decorateTime(MessageObject mo, String time) {
+                  if (isDeleted(mo)) {
+                      return "🗑 удалено" + (time == null || time.length() == 0 ? "" : ", " + time);
+                  }
+                  return time;
+              }
+
+              public static boolean hasEdits(MessageObject mo) {
+                  try {
+                      if (mo == null) return false;
+                      android.database.Cursor c = db().rawQuery("SELECT COUNT(*) FROM edits WHERE dialog_id = ? AND msg_id = ?",
+                              new String[]{String.valueOf(mo.getDialogId()), String.valueOf(mo.getId())});
+                      try {
+                          return c.moveToFirst() && c.getInt(0) > 0;
+                      } finally {
+                          c.close();
+                      }
+                  } catch (Throwable e) {
+                      return false;
+                  }
+              }
+
+              public static AlertDialog editsDialog(Context context, MessageObject mo) {
+                  StringBuilder sb = new StringBuilder();
+                  try {
+                      android.database.Cursor c = db().rawQuery("SELECT date, text FROM edits WHERE dialog_id = ? AND msg_id = ? ORDER BY date ASC",
+                              new String[]{String.valueOf(mo.getDialogId()), String.valueOf(mo.getId())});
+                      try {
+                          String nl = System.lineSeparator();
+                          while (c.moveToNext()) {
+                              long date = c.getLong(0);
+                              sb.append(LocaleController.formatSmallDateChat(date)).append(", ")
+                                      .append(LocaleController.getInstance().getFormatterDay().format(date * 1000L)).append(nl)
+                                      .append(c.getString(1) == null ? "" : c.getString(1)).append(nl).append(nl);
+                          }
+                      } finally {
+                          c.close();
+                      }
+                  } catch (Throwable ignore) { }
+                  AlertDialog.Builder b = new AlertDialog.Builder(context);
+                  b.setTitle("История правок");
+                  b.setMessage(sb.length() == 0 ? "Нет сохранённых правок" : sb.toString().trim());
+                  b.setPositiveButton("OK", null);
+                  return b.create();
+              }
+
+              /** копирует скачанное вложение сообщения в папку шпиона */
+              public static void saveAttachment(final File src, Object parent) {
+                  try {
+                      if (src == null || !get(KEY_ATTACH) || !(parent instanceof MessageObject)) return;
+                      final MessageObject mo = (MessageObject) parent;
+                      if (mo.isSticker() || mo.isAnimatedSticker()) return;
+                      if (isException(mo.getDialogId())) return;
+                      final String name = mo.getDialogId() + "_" + mo.getId() + "_" + src.getName();
+                      Utilities.globalQueue.postRunnable(new Runnable() {
+                          @Override
+                          public void run() {
+                              try {
+                                  if (!src.exists() || src.length() == 0) return;
+                                  File dst = new File(attachmentsDir(), name);
+                                  if (dst.exists()) return;
+                                  InputStream in = new FileInputStream(src);
+                                  OutputStream os = new FileOutputStream(dst);
+                                  try {
+                                      byte[] buf = new byte[65536];
+                                      int r;
+                                      while ((r = in.read(buf)) > 0) {
+                                          os.write(buf, 0, r);
+                                      }
+                                  } finally {
+                                      in.close();
+                                      os.close();
+                                  }
+                                  trim();
+                              } catch (Throwable ignore) { }
+                          }
+                      });
+                  } catch (Throwable ignore) { }
+              }
+
+              private static void recordDeleted(long did, List<Integer> ids) {
+                  if (ids == null) return;
+                  try {
+                      SQLiteDatabase d = db();
+                      long now = System.currentTimeMillis() / 1000;
+                      for (int k = 0; k < ids.size(); k++) {
+                          ContentValues v = new ContentValues();
+                          v.put("dialog_id", did);
+                          v.put("msg_id", ids.get(k));
+                          v.put("date", now);
+                          d.insertWithOnConflict("deleted", null, v, SQLiteDatabase.CONFLICT_IGNORE);
+                          DELETED.add(did + "_" + ids.get(k));
+                      }
+                  } catch (Throwable ignore) { }
+              }
+
+              private static void recordEdit(TLRPC.Message m) {
+                  if (m == null) return;
+                  try {
+                      long did = MessageObject.getDialogId(m);
+                      if (isException(did)) return;
+                      ContentValues v = new ContentValues();
+                      v.put("dialog_id", did);
+                      v.put("msg_id", m.id);
+                      v.put("date", m.edit_date != 0 ? m.edit_date : (int) (System.currentTimeMillis() / 1000));
+                      v.put("text", m.message);
+                      db().insert("edits", null, v);
+                  } catch (Throwable ignore) { }
+              }
+
+              @STATUS_IMPL@
+
+              /** Вызывается из MessagesController.processUpdateArray: удалённые сообщения остаются в чате. */
+              public static void filterUpdates(ArrayList<TLRPC.Update> updates) {
+                  if (updates == null) return;
+                  try {
+                      boolean keepDeleted = get(KEY_DELETED);
+                      boolean keepEdits = get(KEY_EDITS);
+                      boolean keepOnline = get(KEY_LAST_ONLINE);
+                      for (int i = 0; i < updates.size(); i++) {
+                          TLRPC.Update u = updates.get(i);
+                          @CASES@
+                      }
+                  } catch (Throwable ignore) { }
+              }
+          }
+          """
+          java = java.replace("@STATUS_IMPL@", status_impl).replace("@CASES@", "\n                ".join(cases))
+          open("TMessagesProj/src/main/java/org/telegram/messenger/SpyMode.java", "w", encoding="utf-8").write(java)
+
+          # --- хук в MessagesController
+          mc = "TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java"
+          src = open(mc, encoding="utf-8").read()
+          pat = re.compile(r'(\b(?:void|boolean)\s+processUpdateArray\s*\(\s*(?:final\s+)?(?:java\.util\.)?ArrayList<TLRPC\.Update>\s+(\w+)\s*,[^{;]*\)\s*\{)', re.S)
+          count = [0]
+          def rep(m):
+              count[0] += 1
+              return m.group(1) + "\n        org.telegram.messenger.SpyMode.filterUpdates(%s);" % m.group(2)
+          new = pat.sub(rep, src)
+          print("MessagesController.processUpdateArray: пропатчено методов:", count[0])
+          if count[0] == 0:
+              print("::warning::Не нашёл processUpdateArray — «сохранять удалённые» не будет работать. Сигнатуры:")
+              for l in src.splitlines():
+                  if "processUpdateArray" in l and ("void" in l or "boolean" in l):
+                      print("   ", l.strip())
+          else:
+              open(mc, "w", encoding="utf-8").write(new)
+          PY
+
+      - name: Удалённые и изменённые сообщения в чате (ChatMessageCell, ChatActivity)
+        run: |
+          python3 - <<'PY'
+          import re, os
+
+          def warn(msg):
+              print("::warning::" + msg)
+              p = os.environ.get("GITHUB_STEP_SUMMARY")
+              if p:
+                  open(p, "a", encoding="utf-8").write("⚠️ " + msg + "\n\n")
+
+          ui = "TMessagesProj/src/main/java/org/telegram/ui"
+
+          # --- пометка «🗑 удалено» рядом со временем сообщения
+          cell = ui + "/Cells/ChatMessageCell.java"
+          s = open(cell, encoding="utf-8").read()
+          pat = re.compile(r'(\btimeString\s*=\s*timeString\(\s*currentMessageObject\s*,\s*messageObject\s*,\s*edited\s*,[^;]*;)')
+          n = pat.subn(lambda m: m.group(1) + "\n        timeString = org.telegram.messenger.SpyMode.decorateTime(currentMessageObject, timeString);", s, count=1)
+          if n[1]:
+              open(cell, "w", encoding="utf-8").write(n[0])
+              print("ChatMessageCell: пометка удалённых добавлена")
+          else:
+              warn("ChatMessageCell: не нашёл строку timeString = timeString(...) — пометка «удалено» не добавлена")
+
+          # --- «История правок» в меню сообщения
+          chat = ui + "/ChatActivity.java"
+          s = open(chat, encoding="utf-8").read()
+          ok = True
+          a = "public final static int OPTION_COPY = 3;"
+          if a not in s:
+              ok = False
+          else:
+              s = s.replace(a, a + "\n    public final static int OPTION_SPY_EDITS = 9001;", 1)
+
+          m = re.search(r'\n([ \t]*)if \(type == -1\) \{\n', s)
+          if not m:
+              ok = False
+          else:
+              ind = m.group(1)
+              add = ("\n" + ind + "if (org.telegram.messenger.SpyMode.hasEdits(selectedObject)) {"
+                     "\n" + ind + "    items.add(\"История правок\");"
+                     "\n" + ind + "    options.add(OPTION_SPY_EDITS);"
+                     "\n" + ind + "    icons.add(R.drawable.msg_edit);"
+                     "\n" + ind + "}\n")
+              s = s[:m.start()] + add + s[m.start():]
+
+          m = re.search(r'\n([ \t]*)case OPTION_COPY: \{', s)
+          if not m:
+              ok = False
+          else:
+              ind = m.group(1)
+              case = ("\n" + ind + "case OPTION_SPY_EDITS: {"
+                      "\n" + ind + "    showDialog(org.telegram.messenger.SpyMode.editsDialog(getParentActivity(), selectedObject));"
+                      "\n" + ind + "    break;"
+                      "\n" + ind + "}")
+              s = s[:m.start()] + case + s[m.start():]
+
+          if ok:
+              open(chat, "w", encoding="utf-8").write(s)
+              print("ChatActivity: пункт «История правок» добавлен")
+          else:
+              warn("ChatActivity: не нашёл нужные места — пункт «История правок» не добавлен")
+          PY
+
+      - name: Сохранение вложений (FileLoader)
+        run: |
+          python3 - <<'PY'
+          import re, os
+
+          fl = "TMessagesProj/src/main/java/org/telegram/messenger/FileLoader.java"
+          s = open(fl, encoding="utf-8").read()
+          pat = re.compile(r'(if \(!operation\.isPreloadVideoOperation\(\)\) \{\s*\n(\s*)loadOperationPathsUI\.remove\(fileName\);)')
+          n = pat.subn(lambda m: m.group(1) + "\n" + m.group(2) + "org.telegram.messenger.SpyMode.saveAttachment(finalFile, parentObject);", s, count=1)
+          if n[1]:
+              open(fl, "w", encoding="utf-8").write(n[0])
+              print("FileLoader: сохранение вложений добавлено")
+          else:
+              msg = "FileLoader: не нашёл didFinishLoadingFile — вложения не будут копироваться"
+              print("::warning::" + msg)
+              p = os.environ.get("GITHUB_STEP_SUMMARY")
+              if p:
+                  open(p, "a", encoding="utf-8").write("⚠️ " + msg + "\n\n")
+          PY
+
       - name: Раздел «Настройки FluxGram» в настройках приложения
         run: |
           python3 - <<'PY'
@@ -438,13 +1142,13 @@ jobs:
           if not os.path.exists(sa_path):
               bail("нет SettingsActivity.java")
 
-          for f in (base + "/Cells/TextCheckCell.java", base + "/Cells/HeaderCell.java",
+          for f in (base + "/Cells/TextCheckCell.java", base + "/Cells/HeaderCell.java", base + "/Cells/TextSettingsCell.java",
                     base + "/ActionBar/BaseFragment.java", base + "/ActionBar/ActionBar.java",
                     base + "/ActionBar/Theme.java"):
               if not os.path.exists(f):
                   bail("нет файла " + f)
           theme = open(base + "/ActionBar/Theme.java", encoding="utf-8").read()
-          for k in ("key_windowBackgroundGray", "key_windowBackgroundWhite", "key_windowBackgroundWhiteGrayText4"):
+          for k in ("key_windowBackgroundGray", "key_windowBackgroundWhite", "key_windowBackgroundWhiteGrayText4", "key_windowBackgroundWhiteBlueHeader", "key_windowBackgroundWhiteBlackText"):
               if k not in theme:
                   bail("нет ключа темы " + k)
           if "setTextAndCheck(" not in open(base + "/Cells/TextCheckCell.java", encoding="utf-8").read():
@@ -618,6 +1322,456 @@ jobs:
           }"""
           open(base + "/GhostSettingsActivity.java", "w", encoding="utf-8").write(frag)
 
+          tsc = open(base + "/Cells/TextSettingsCell.java", encoding="utf-8").read()
+          tcc = open(base + "/Cells/TextCheckCell.java", encoding="utf-8").read()
+
+          if "void setText(" in tsc and "setTextAndValue(" in tsc:
+              value_call = "setTextAndValueAndCheck(title, value, SpyMode.get(key), false, divider);" if "setTextAndValueAndCheck(" in tcc \
+                  else "setTextAndCheck(title + \" — \" + value, SpyMode.get(key), divider);"
+              red_call = "cell.getTextView().setTextColor(0xFFE05A5A);" if "getTextView()" in tsc else ""
+
+              spy = """package org.telegram.ui;
+
+          import android.app.Activity;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.graphics.Canvas;
+          import android.graphics.Paint;
+          import android.graphics.RectF;
+          import android.graphics.drawable.GradientDrawable;
+          import android.text.InputType;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.EditText;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import org.telegram.messenger.AndroidUtilities;
+          import org.telegram.messenger.R;
+          import org.telegram.messenger.SpyMode;
+          import org.telegram.ui.ActionBar.ActionBar;
+          import org.telegram.ui.ActionBar.AlertDialog;
+          import org.telegram.ui.ActionBar.BaseFragment;
+          import org.telegram.ui.ActionBar.Theme;
+          import org.telegram.ui.Cells.HeaderCell;
+          import org.telegram.ui.Cells.TextCheckCell;
+          import org.telegram.ui.Cells.TextSettingsCell;
+
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.util.ArrayList;
+
+          public class SpySettingsActivity extends BaseFragment {
+
+              private static final int REQ_EXPORT = 9101;
+              private static final int REQ_IMPORT = 9102;
+
+              private TextView usedNote;
+              private TextSettingsCell folderCell;
+
+              @Override
+              public View createView(final Context context) {
+                  actionBar.setBackButtonImage(R.drawable.ic_ab_back);
+                  actionBar.setAllowOverlayTitle(true);
+                  actionBar.setTitle("Шпион");
+                  actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
+                      @Override
+                      public void onItemClick(int id) {
+                          if (id == -1) {
+                              finishFragment();
+                          }
+                      }
+                  });
+
+                  FrameLayout root = new FrameLayout(context);
+                  root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
+                  fragmentView = root;
+
+                  ScrollView scroll = new ScrollView(context);
+                  root.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                  LinearLayout list = new LinearLayout(context);
+                  list.setOrientation(LinearLayout.VERTICAL);
+                  scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  HeaderCell header = new HeaderCell(context);
+                  header.setText("Режим шпиона");
+                  list.addView(header, matchWrap());
+
+                  LinearLayout c1 = card(context, list);
+                  addSwitch(c1, context, "Сохранять удалённые сообщения", null, SpyMode.KEY_DELETED, true);
+                  addSwitch(c1, context, "Сохранять историю правок", null, SpyMode.KEY_EDITS, true);
+                  TextSettingsCell exc = new TextSettingsCell(context);
+                  exc.setText("Управление исключениями", false);
+                  exc.setOnClickListener(v -> showExceptions(context));
+                  c1.addView(exc, matchWrap());
+
+                  LinearLayout c2 = card(context, list);
+                  addSwitch(c2, context, "Сохранять вложения", "Настроить чаты и лимиты", SpyMode.KEY_ATTACH, true);
+                  folderCell = new TextSettingsCell(context);
+                  folderCell.setTextAndValue("Папка вложений", SpyMode.folderName(), true);
+                  folderCell.setOnClickListener(v -> showFolderDialog(context));
+                  c2.addView(folderCell, matchWrap());
+                  LimitView limit = new LimitView(context, SpyMode.LIMIT_TITLES, SpyMode.getLimit(), new LimitView.Callback() {
+                      @Override
+                      public void onSelect(int index) {
+                          SpyMode.setLimit(index);
+                          updateNote();
+                      }
+                  });
+                  c2.addView(limit, matchWrap());
+                  usedNote = note(list, context, "");
+                  updateNote();
+
+                  LinearLayout c3 = card(context, list);
+                  addSwitch(c3, context, "Сохранять дату чтения", null, SpyMode.KEY_READ_DATE, false);
+                  note(list, context, "Локально сохраняет данные о чтении сообщений. Будет использоваться, если Telegram не предоставит дату чтения.");
+
+                  LinearLayout c4 = card(context, list);
+                  addSwitch(c4, context, "Сохранять последний онлайн", null, SpyMode.KEY_LAST_ONLINE, false);
+                  note(list, context, "Сохраняет последний известный онлайн для людей со скрытым последним посещением. Вы сможете очень приблизительно увидеть, когда они были последний раз онлайн.");
+
+                  LinearLayout c5 = card(context, list);
+                  TextSettingsCell exp = new TextSettingsCell(context);
+                  exp.setText("Экспорт базы данных", true);
+                  exp.setOnClickListener(v -> {
+                      Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                      i.addCategory(Intent.CATEGORY_OPENABLE);
+                      i.setType("application/octet-stream");
+                      i.putExtra(Intent.EXTRA_TITLE, "spy.db");
+                      getParentActivity().startActivityForResult(i, REQ_EXPORT);
+                  });
+                  c5.addView(exp, matchWrap());
+                  TextSettingsCell imp = new TextSettingsCell(context);
+                  imp.setText("Импорт базы данных", false);
+                  imp.setOnClickListener(v -> {
+                      Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                      i.addCategory(Intent.CATEGORY_OPENABLE);
+                      i.setType("*/*");
+                      getParentActivity().startActivityForResult(i, REQ_IMPORT);
+                  });
+                  c5.addView(imp, matchWrap());
+
+                  LinearLayout c6 = card(context, list);
+                  TextSettingsCell cell = new TextSettingsCell(context);
+                  cell.setText("Очистить", false);
+                  @RED_CALL@
+                  cell.setOnClickListener(v -> {
+                      AlertDialog.Builder b = new AlertDialog.Builder(context);
+                      b.setTitle("Очистить");
+                      b.setMessage("Удалить сохранённые данные шпиона и все сохранённые вложения?");
+                      b.setPositiveButton("Очистить", (d, w) -> {
+                          SpyMode.clear();
+                          updateNote();
+                          toast("Очищено");
+                      });
+                      b.setNegativeButton("Отмена", null);
+                      showDialog(b.create());
+                  });
+                  c6.addView(cell, matchWrap());
+
+                  View pad = new View(context);
+                  list.addView(pad, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, AndroidUtilities.dp(24)));
+                  return fragmentView;
+              }
+
+              public void onActivityResultFragment(int requestCode, int resultCode, Intent data) {
+                  if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
+                      return;
+                  }
+                  try {
+                      if (requestCode == REQ_EXPORT) {
+                          OutputStream os = getParentActivity().getContentResolver().openOutputStream(data.getData());
+                          SpyMode.exportTo(os);
+                          toast("База данных экспортирована");
+                      } else if (requestCode == REQ_IMPORT) {
+                          InputStream in = getParentActivity().getContentResolver().openInputStream(data.getData());
+                          SpyMode.importFrom(in);
+                          toast("База данных импортирована");
+                      }
+                  } catch (Exception e) {
+                      toast("Ошибка: " + e.getMessage());
+                  }
+              }
+
+              private void toast(String s) {
+                  if (getParentActivity() != null) {
+                      Toast.makeText(getParentActivity(), s, Toast.LENGTH_SHORT).show();
+                  }
+              }
+
+              private void updateNote() {
+                  if (usedNote == null) return;
+                  String used = AndroidUtilities.formatFileSize(SpyMode.usedBytes());
+                  boolean unlimited = SpyMode.getLimit() >= SpyMode.LIMIT_TITLES.length - 1;
+                  usedNote.setText("Занято " + used + ". " + (unlimited ? "Вложения не удаляются автоматически." : "Старые вложения удаляются при превышении лимита."));
+              }
+
+              private void showFolderDialog(final Context context) {
+                  final EditText input = new EditText(context);
+                  input.setText(SpyMode.folderName());
+                  AlertDialog.Builder b = new AlertDialog.Builder(context);
+                  b.setTitle("Папка вложений");
+                  b.setView(input);
+                  b.setPositiveButton("OK", (d, w) -> {
+                      SpyMode.setFolderName(input.getText().toString());
+                      folderCell.setTextAndValue("Папка вложений", SpyMode.folderName(), true);
+                      updateNote();
+                  });
+                  b.setNegativeButton("Отмена", null);
+                  showDialog(b.create());
+              }
+
+              private void showExceptions(final Context context) {
+                  final EditText input = new EditText(context);
+                  input.setHint("ID чата");
+                  input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
+                  ArrayList<String> ids = new ArrayList<>(SpyMode.getExceptions());
+                  AlertDialog.Builder b = new AlertDialog.Builder(context);
+                  b.setTitle("Управление исключениями");
+                  b.setMessage("Для этих чатов удалённые сообщения и правки не сохраняются: " + (ids.isEmpty() ? "список пуст" : android.text.TextUtils.join(", ", ids)) + ". Введите ID чата, чтобы добавить его или убрать из списка.");
+                  b.setView(input);
+                  b.setPositiveButton("OK", (d, w) -> {
+                      try {
+                          long id = Long.parseLong(input.getText().toString().trim());
+                          boolean added = SpyMode.toggleException(id);
+                          toast(added ? "Добавлено в исключения" : "Убрано из исключений");
+                      } catch (Exception e) {
+                          toast("Неверный ID");
+                      }
+                  });
+                  b.setNegativeButton("Отмена", null);
+                  showDialog(b.create());
+              }
+
+              private LinearLayout.LayoutParams matchWrap() {
+                  return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+              }
+
+              private LinearLayout card(Context context, LinearLayout list) {
+                  LinearLayout c = new LinearLayout(context);
+                  c.setOrientation(LinearLayout.VERTICAL);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  bg.setCornerRadius(AndroidUtilities.dp(18));
+                  c.setBackground(bg);
+                  c.setClipToOutline(true);
+                  LinearLayout.LayoutParams lp = matchWrap();
+                  lp.setMargins(AndroidUtilities.dp(12), AndroidUtilities.dp(6), AndroidUtilities.dp(12), AndroidUtilities.dp(6));
+                  list.addView(c, lp);
+                  return c;
+              }
+
+              private TextView note(LinearLayout list, Context context, String text) {
+                  TextView t = new TextView(context);
+                  t.setText(text);
+                  t.setTextSize(14);
+                  t.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+                  t.setPadding(AndroidUtilities.dp(24), AndroidUtilities.dp(6), AndroidUtilities.dp(24), AndroidUtilities.dp(10));
+                  list.addView(t, matchWrap());
+                  return t;
+              }
+
+              private void addSwitch(LinearLayout card, Context context, String title, String value, final String key, boolean divider) {
+                  final TextCheckCell cell = new TextCheckCell(context);
+                  if (value == null) {
+                      cell.setTextAndCheck(title, SpyMode.get(key), divider);
+                  } else {
+                      cell.@VALUE_CALL@
+                  }
+                  cell.setOnClickListener(v -> {
+                      boolean b = !SpyMode.get(key);
+                      SpyMode.set(key, b);
+                      cell.setChecked(b);
+                  });
+                  card.addView(cell, matchWrap());
+              }
+
+              /** Ползунок лимита вложений: 300 MB · 1 GB · 2 GB · 5 GB · 16 GB · ∞ */
+              static class LimitView extends View {
+                  interface Callback {
+                      void onSelect(int index);
+                  }
+
+                  private final String[] labels;
+                  private final Callback callback;
+                  private int sel;
+                  private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final RectF rect = new RectF();
+
+                  LimitView(Context context, String[] labels, int selected, Callback callback) {
+                      super(context);
+                      this.labels = labels;
+                      this.sel = Math.max(0, Math.min(labels.length - 1, selected));
+                      this.callback = callback;
+                  }
+
+                  @Override
+                  protected void onMeasure(int w, int h) {
+                      setMeasuredDimension(MeasureSpec.getSize(w), AndroidUtilities.dp(78));
+                  }
+
+                  private float stopX(int i) {
+                      float left = AndroidUtilities.dp(28);
+                      float right = getMeasuredWidth() - AndroidUtilities.dp(28);
+                      return left + (right - left) * i / (labels.length - 1);
+                  }
+
+                  @Override
+                  protected void onDraw(Canvas canvas) {
+                      float left = AndroidUtilities.dp(28);
+                      float right = getMeasuredWidth() - AndroidUtilities.dp(28);
+                      float ty = AndroidUtilities.dp(54);
+                      float half = AndroidUtilities.dp(5);
+                      int accent = Theme.getColor(Theme.key_windowBackgroundWhiteBlueHeader);
+                      int text = Theme.getColor(Theme.key_windowBackgroundWhiteBlackText);
+                      float sx = stopX(sel);
+
+                      paint.setStyle(Paint.Style.FILL);
+                      paint.setColor(accent);
+                      paint.setAlpha(70);
+                      rect.set(left - half, ty - half, right + half, ty + half);
+                      canvas.drawRoundRect(rect, half, half, paint);
+
+                      paint.setColor(accent);
+                      rect.set(left - half, ty - half, sx, ty + half);
+                      canvas.drawRoundRect(rect, half, half, paint);
+
+                      paint.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                      for (int i = 0; i < labels.length; i++) {
+                          canvas.drawCircle(stopX(i), ty, AndroidUtilities.dp(2), paint);
+                      }
+
+                      textPaint.setTextSize(AndroidUtilities.dp(15));
+                      textPaint.setColor(text);
+                      textPaint.setTextAlign(Paint.Align.CENTER);
+                      for (int i = 0; i < labels.length; i++) {
+                          canvas.drawText(labels[i], stopX(i), AndroidUtilities.dp(26), textPaint);
+                      }
+
+                      paint.setColor(text);
+                      rect.set(sx - AndroidUtilities.dp(1.5f), ty - AndroidUtilities.dp(14), sx + AndroidUtilities.dp(1.5f), ty + AndroidUtilities.dp(14));
+                      canvas.drawRoundRect(rect, AndroidUtilities.dp(1.5f), AndroidUtilities.dp(1.5f), paint);
+                  }
+
+                  @Override
+                  public boolean onTouchEvent(MotionEvent e) {
+                      switch (e.getAction()) {
+                          case MotionEvent.ACTION_DOWN:
+                          case MotionEvent.ACTION_MOVE: {
+                              if (getParent() != null) {
+                                  getParent().requestDisallowInterceptTouchEvent(true);
+                              }
+                              int best = 0;
+                              float bd = Float.MAX_VALUE;
+                              for (int i = 0; i < labels.length; i++) {
+                                  float d = Math.abs(stopX(i) - e.getX());
+                                  if (d < bd) {
+                                      bd = d;
+                                      best = i;
+                                  }
+                              }
+                              if (best != sel) {
+                                  sel = best;
+                                  invalidate();
+                              }
+                              break;
+                          }
+                          case MotionEvent.ACTION_UP:
+                          case MotionEvent.ACTION_CANCEL:
+                              callback.onSelect(sel);
+                              break;
+                      }
+                      return true;
+                  }
+              }
+          }
+          """
+              spy = spy.replace("@VALUE_CALL@", value_call).replace("@RED_CALL@", red_call)
+              open(base + "/SpySettingsActivity.java", "w", encoding="utf-8").write(spy)
+
+              hub = """package org.telegram.ui;
+
+          import android.content.Context;
+          import android.graphics.drawable.GradientDrawable;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+
+          import org.telegram.messenger.AndroidUtilities;
+          import org.telegram.messenger.R;
+          import org.telegram.ui.ActionBar.ActionBar;
+          import org.telegram.ui.ActionBar.BaseFragment;
+          import org.telegram.ui.ActionBar.Theme;
+          import org.telegram.ui.Cells.HeaderCell;
+          import org.telegram.ui.Cells.TextSettingsCell;
+
+          public class FluxHubActivity extends BaseFragment {
+
+              @Override
+              public View createView(Context context) {
+                  actionBar.setBackButtonImage(R.drawable.ic_ab_back);
+                  actionBar.setAllowOverlayTitle(true);
+                  actionBar.setTitle("FluxGram");
+                  actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
+                      @Override
+                      public void onItemClick(int id) {
+                          if (id == -1) {
+                              finishFragment();
+                          }
+                      }
+                  });
+
+                  FrameLayout root = new FrameLayout(context);
+                  root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
+                  fragmentView = root;
+
+                  ScrollView scroll = new ScrollView(context);
+                  root.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                  LinearLayout list = new LinearLayout(context);
+                  list.setOrientation(LinearLayout.VERTICAL);
+                  scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  HeaderCell header = new HeaderCell(context);
+                  header.setText("Категории");
+                  list.addView(header, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  LinearLayout c = new LinearLayout(context);
+                  c.setOrientation(LinearLayout.VERTICAL);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  bg.setCornerRadius(AndroidUtilities.dp(18));
+                  c.setBackground(bg);
+                  c.setClipToOutline(true);
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  lp.setMargins(AndroidUtilities.dp(12), AndroidUtilities.dp(6), AndroidUtilities.dp(12), AndroidUtilities.dp(6));
+                  list.addView(c, lp);
+
+                  TextSettingsCell ghost = new TextSettingsCell(context);
+                  ghost.setText("Режим призрака", true);
+                  ghost.setOnClickListener(v -> presentFragment(new GhostSettingsActivity()));
+                  c.addView(ghost, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  TextSettingsCell spy = new TextSettingsCell(context);
+                  spy.setText("Шпион", false);
+                  spy.setOnClickListener(v -> presentFragment(new SpySettingsActivity()));
+                  c.addView(spy, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                  return fragmentView;
+              }
+          }
+          """
+              open(base + "/FluxHubActivity.java", "w", encoding="utf-8").write(hub)
+              hub_ok = True
+          else:
+              print("::warning::TextSettingsCell другой API — экран «Шпион» не создан")
+              hub_ok = False
+
           # --- пункт в SettingsActivity: отдельная группа после блока «Язык»
           s = open(sa_path, encoding="utf-8").read()
           m = re.search(r'\n([ \t]*)items\.add\(SettingCell\.Factory\.of\(10,[^\n]*\);', s)
@@ -633,7 +1787,7 @@ jobs:
               bail("не нашёл обработчик клика (case 24)")
           ind2 = mc.group(1)
           click = ('\n' + ind2 + 'case 28: {' +
-                   '\n' + ind2 + '    presentFragment(new GhostSettingsActivity());' +
+                   '\n' + ind2 + '    presentFragment(new ' + ("FluxHubActivity" if hub_ok else "GhostSettingsActivity") + '());' +
                    '\n' + ind2 + '    break;' +
                    '\n' + ind2 + '}')
           s = s[:mc.start()] + click + s[mc.start():]
