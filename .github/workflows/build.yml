@@ -1918,7 +1918,7 @@ jobs:
           print("✅ Premium скрыт по флагу hide_premium")
           PY
 
-      - name: FluxGram - звёзды, интерфейс Telegram, Premium (визуал), сохранение чата
+      - name: FluxGram - Premium (визуал), сохранение чата + затемнение, Свободный режим, ID и номер
         run: |
           python3 - <<'PY'
           import re, os
@@ -1926,15 +1926,14 @@ jobs:
           base = "TMessagesProj/src/main/java/org/telegram"
           ui = base + "/ui"
           msg = base + "/messenger"
+          tg = base + "/tgnet"
           report = []
 
           def ok(m):
-              print(m)
-              report.append("OK   " + m)
+              print(m); report.append("OK   " + m)
 
           def warn(m):
-              print("::warning::" + m)
-              report.append("FAIL " + m)
+              print("::warning::" + m); report.append("FAIL " + m)
 
           def read(p):
               try:
@@ -1945,20 +1944,43 @@ jobs:
           def write(p, s):
               open(p, "w", encoding="utf-8").write(s)
 
-          # --- какие события NotificationCenter есть в этой версии форка
-          nc = read(msg + "/NotificationCenter.java")
-          events = [n for n in ("mainUserInfoChanged", "starBalanceUpdated", "currentUserPremiumStatusChanged")
-                    if re.search(r'\b' + n + r'\s*=', nc)]
-          n_acc = "".join("                NotificationCenter.getInstance(a).postNotificationName(NotificationCenter.%s);\n" % n for n in events)
-          n_glob = "".join("            NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.%s);\n" % n for n in events)
+          def add_import(s, imp):
+              if imp in s:
+                  return s
+              return re.sub(r'(?m)^(package [^\n]+;\n)', lambda m: m.group(1) + "\n" + imp + "\n", s, count=1)
 
-          # ============================================================ FluxVisual (логика: звёзды, premium, сохранение чата)
+          # TL-схема: какие классы resolveUsername/resolvedPeer реально есть в этом форке
+          tlrpc = read(tg + "/TLRPC.java")
+          SRC = {"TLRPC": tlrpc}
+          import glob
+          for f in glob.glob(tg + "/tl/*.java"):
+              SRC[os.path.basename(f)[:-5]] = read(f)
+
+          Q = {}
+          def has(name):
+              for holder, text in SRC.items():
+                  if re.search(r'class\s+' + name + r'\b', text):
+                      Q[name] = ("TLRPC." if holder == "TLRPC" else "org.telegram.tgnet.tl." + holder + ".") + name
+                      return True
+              return False
+
+          resolve_ok = has("TL_contacts_resolveUsername") and has("TL_contacts_resolvedPeer")
+
+          # ============================================================ FluxVisual (ядро: premium, сохранение чата, удалённые диалоги, свободный режим)
           visual = r"""package org.telegram.messenger;
 
           import android.content.Context;
           import android.content.SharedPreferences;
+          import android.graphics.Canvas;
+          import android.graphics.Paint;
+          import android.graphics.drawable.Drawable;
 
           import org.telegram.tgnet.TLRPC;
+
+          import java.util.ArrayList;
+          import java.util.HashSet;
+          import java.util.List;
+          import java.util.Set;
 
           /** Локальные визуальные настройки FluxGram. Сервер и реальный аккаунт не затрагиваются. */
           public final class FluxVisual {
@@ -1966,14 +1988,13 @@ jobs:
               private static final String PREFS = "fluxgram";
               private static final boolean DEF_PREMIUM = true;
               private static final boolean DEF_KEEP_CHAT = true;
-              private static final boolean DEF_STARS = false;
-              private static final long DEF_STARS_AMOUNT = 1000L;
-              public static final long MAX_STARS = 1000000000L;
+              private static final boolean DEF_FREE_MODE = false;
+              public static final float DIM_ALPHA = 0.45f;
 
               private static volatile int premiumState = -1;
-              private static volatile int starsState = -1;
               private static volatile int keepState = -1;
-              private static volatile long starsValue = -1L;
+              private static volatile int freeModeState = -1;
+              private static Set<Long> removedDialogs;
 
               private static SharedPreferences prefs() {
                   Context c = ApplicationLoader.applicationContext;
@@ -1987,15 +2008,25 @@ jobs:
                   }
               }
 
+              public static boolean isSelf(long userId) {
+                  try {
+                      for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+                          UserConfig uc = UserConfig.getInstance(a);
+                          if (uc.isClientActivated() && uc.getClientUserId() == userId) {
+                              return true;
+                          }
+                      }
+                  } catch (Throwable ignore) {
+                  }
+                  return false;
+              }
+
               // ---------------------------------------------------------------- Premium (визуал)
               public static boolean premiumOn() {
                   int s = premiumState;
                   if (s < 0) {
                       SharedPreferences p = prefs();
-                      if (p == null) {
-                          return DEF_PREMIUM;
-                      }
-                      s = p.getBoolean("visual_premium", DEF_PREMIUM) ? 1 : 0;
+                      s = (p == null ? DEF_PREMIUM : p.getBoolean("visual_premium", DEF_PREMIUM)) ? 1 : 0;
                       premiumState = s;
                   }
                   return s == 1;
@@ -2008,7 +2039,6 @@ jobs:
                   refreshUi();
               }
 
-              /** Вызывается из MessagesController.putUser: свой профиль всегда с флагом premium, пока режим включён. */
               public static void onPutUser(TLRPC.User u, long selfId) {
                   if (u == null || u.id != selfId || !premiumOn()) {
                       return;
@@ -2054,68 +2084,18 @@ jobs:
                       @Override
                       public void run() {
                           applySelf();
+                          loadRemovedDialogs();
                           refreshUi();
                       }
                   }, 4000);
               }
 
-              // ---------------------------------------------------------------- Звёзды (визуал)
-              public static boolean starsOn() {
-                  int s = starsState;
-                  if (s < 0) {
-                      SharedPreferences p = prefs();
-                      if (p == null) {
-                          return DEF_STARS;
-                      }
-                      s = p.getBoolean("visual_stars", DEF_STARS) ? 1 : 0;
-                      starsState = s;
-                  }
-                  return s == 1;
-              }
-
-              public static void setStars(boolean on) {
-                  putBool("visual_stars", on);
-                  starsState = on ? 1 : 0;
-                  refreshUi();
-              }
-
-              public static long starsAmount() {
-                  long v = starsValue;
-                  if (v < 0) {
-                      SharedPreferences p = prefs();
-                      if (p == null) {
-                          return DEF_STARS_AMOUNT;
-                      }
-                      v = p.getLong("visual_stars_amount", DEF_STARS_AMOUNT);
-                      starsValue = v;
-                  }
-                  return v;
-              }
-
-              public static void setStarsAmount(long v) {
-                  if (v < 0) {
-                      v = 0;
-                  }
-                  if (v > MAX_STARS) {
-                      v = MAX_STARS;
-                  }
-                  SharedPreferences p = prefs();
-                  if (p != null) {
-                      p.edit().putLong("visual_stars_amount", v).apply();
-                  }
-                  starsValue = v;
-                  refreshUi();
-              }
-
-              // ---------------------------------------------------------------- Сохранение чата
+              // ---------------------------------------------------------------- Сохранение чата + затемнение (как в AyuGram)
               public static boolean keepChat() {
                   int s = keepState;
                   if (s < 0) {
                       SharedPreferences p = prefs();
-                      if (p == null) {
-                          return DEF_KEEP_CHAT;
-                      }
-                      s = p.getBoolean("keep_chat", DEF_KEEP_CHAT) ? 1 : 0;
+                      s = (p == null ? DEF_KEEP_CHAT : p.getBoolean("keep_chat", DEF_KEEP_CHAT)) ? 1 : 0;
                       keepState = s;
                   }
                   return s == 1;
@@ -2126,14 +2106,169 @@ jobs:
                   keepState = on ? 1 : 0;
               }
 
-              // ---------------------------------------------------------------- Интерфейс
-              public static boolean hidePremium() {
+              private static synchronized void loadRemovedDialogs() {
+                  if (removedDialogs != null) {
+                      return;
+                  }
+                  removedDialogs = new HashSet<>();
                   SharedPreferences p = prefs();
-                  return p == null || p.getBoolean("hide_premium", true);
+                  String raw = p == null ? "" : p.getString("removed_dialogs", "");
+                  if (raw.length() > 0) {
+                      for (String part : raw.split(",")) {
+                          try {
+                              removedDialogs.add(Long.parseLong(part));
+                          } catch (NumberFormatException ignore) {
+                          }
+                      }
+                  }
               }
 
-              public static void setHidePremium(boolean on) {
-                  putBool("hide_premium", on);
+              /** Диалог удалён/покинут со стороны собеседника, но оставлен в списке благодаря «Сохранять чат». */
+              public static synchronized void markRemovedDialog(long dialogId) {
+                  loadRemovedDialogs();
+                  if (removedDialogs.add(dialogId)) {
+                      SharedPreferences p = prefs();
+                      if (p != null) {
+                          StringBuilder sb = new StringBuilder();
+                          for (Long id : removedDialogs) {
+                              if (sb.length() > 0) {
+                                  sb.append(',');
+                              }
+                              sb.append(id);
+                          }
+                          p.edit().putString("removed_dialogs", sb.toString()).apply();
+                      }
+                  }
+              }
+
+              public static synchronized boolean isRemovedDialog(long dialogId) {
+                  loadRemovedDialogs();
+                  return removedDialogs.contains(dialogId);
+              }
+
+              // ---------------------------------------------------------------- Свободный режим (визуальные подарки/NFT, только у себя)
+              public static boolean freeModeOn() {
+                  int s = freeModeState;
+                  if (s < 0) {
+                      SharedPreferences p = prefs();
+                      s = (p == null ? DEF_FREE_MODE : p.getBoolean("free_mode", DEF_FREE_MODE)) ? 1 : 0;
+                      freeModeState = s;
+                  }
+                  return s == 1;
+              }
+
+              public static void setFreeMode(boolean on) {
+                  putBool("free_mode", on);
+                  freeModeState = on ? 1 : 0;
+                  refreshUi();
+              }
+
+              public static final class Gift {
+                  public final String emoji;
+                  public final String title;
+
+                  public Gift(String emoji, String title) {
+                      this.emoji = emoji;
+                      this.title = title;
+                  }
+              }
+
+              public static List<Gift> getGifts() {
+                  List<Gift> list = new ArrayList<>();
+                  SharedPreferences p = prefs();
+                  String raw = p == null ? "" : p.getString("free_gifts", "");
+                  if (raw.length() == 0) {
+                      return list;
+                  }
+                  for (String row : raw.split("\n")) {
+                      int i = row.indexOf('\t');
+                      if (i < 0) {
+                          continue;
+                      }
+                      list.add(new Gift(row.substring(0, i), row.substring(i + 1)));
+                  }
+                  return list;
+              }
+
+              public static int giftCount() {
+                  return getGifts().size();
+              }
+
+              public static void addGift(String emoji, String title) {
+                  List<Gift> list = getGifts();
+                  if (list.size() >= 60) {
+                      return;
+                  }
+                  list.add(new Gift(emoji, title));
+                  saveGifts(list);
+              }
+
+              public static void removeGift(int index) {
+                  List<Gift> list = getGifts();
+                  if (index < 0 || index >= list.size()) {
+                      return;
+                  }
+                  list.remove(index);
+                  saveGifts(list);
+              }
+
+              private static void saveGifts(List<Gift> list) {
+                  StringBuilder sb = new StringBuilder();
+                  for (Gift g : list) {
+                      if (sb.length() > 0) {
+                          sb.append('\n');
+                      }
+                      sb.append(g.emoji.replace("\t", "").replace("\n", "")).append('\t').append(g.title.replace("\t", "").replace("\n", ""));
+                  }
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putString("free_gifts", sb.toString()).apply();
+                  }
+                  refreshUi();
+              }
+
+              /** Маленький значок-индикатор коллекции для ника в своём профиле. Полный список — в экране «Свободный режим». */
+              public static Drawable giftBadge(Context context) {
+                  final int size = AndroidUtilities.dp(20);
+                  final String label = String.valueOf(giftCount());
+                  return new Drawable() {
+                      private final Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
+                      private final Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+                      @Override
+                      public void draw(Canvas canvas) {
+                          bg.setColor(0xFFB06BFF);
+                          float r = size / 2f;
+                          canvas.drawCircle(r, r, r, bg);
+                          tp.setColor(0xFFFFFFFF);
+                          tp.setTextSize(size * 0.52f);
+                          tp.setTextAlign(Paint.Align.CENTER);
+                          canvas.drawText(label, r, r - (tp.ascent() + tp.descent()) / 2f, tp);
+                      }
+
+                      @Override
+                      public void setAlpha(int alpha) {
+                      }
+
+                      @Override
+                      public void setColorFilter(android.graphics.ColorFilter cf) {
+                      }
+
+                      @Override
+                      public int getOpacity() {
+                          return android.graphics.PixelFormat.TRANSLUCENT;
+                      }
+
+                      @Override
+                      public int getIntrinsicWidth() {
+                          return size;
+                      }
+
+                      @Override
+                      public int getIntrinsicHeight() {
+                          return size;
+                      }
+                  };
               }
 
               public static void refreshUi() {
@@ -2154,16 +2289,39 @@ jobs:
               }
           }
           """
-          visual = visual.replace("@NOTIFY_ACC@", n_acc.replace("                NotificationCenter", "                        NotificationCenter"))
-          visual = visual.replace("@NOTIFY_GLOBAL@", n_glob.replace("            NotificationCenter", "                    NotificationCenter"))
+          nc = read(msg + "/NotificationCenter.java")
+          events = [n for n in ("mainUserInfoChanged", "currentUserPremiumStatusChanged") if re.search(r'\b' + n + r'\s*=', nc)]
+          n_acc = "".join("                        NotificationCenter.getInstance(a).postNotificationName(NotificationCenter.%s);\n" % n for n in events)
+          n_glob = "".join("                    NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.%s);\n" % n for n in events)
+          visual = visual.replace("@NOTIFY_ACC@", n_acc).replace("@NOTIFY_GLOBAL@", n_glob)
           write(msg + "/FluxVisual.java", visual)
-          ok("FluxVisual создан (события: %s)" % ", ".join(events))
+          ok("FluxVisual пересобран (без звёзд и интерфейса; добавлены Removed-диалоги и Свободный режим, события: %s)" % ", ".join(events))
 
-          # ============================================================ экран «Звёзды»
-          stars = r"""package org.telegram.ui;
+          # ============================================================ удаляем старые экраны «Звёзды» и «Интерфейс Telegram»
+          for f, title in ((ui + "/FluxStarsActivity.java", "Звёзды"), (ui + "/FluxInterfaceActivity.java", "Интерфейс Telegram")):
+              if os.path.exists(f):
+                  os.remove(f)
+                  ok("Удалён экран «%s» (%s)" % (title, f))
+              else:
+                  ok("Экран «%s» отсутствует, удалять нечего" % title)
 
+          # откатываем правки StarsController (визуальный баланс больше не нужен)
+          import glob as _glob
+          for p in _glob.glob(base + "/**/StarsController.java", recursive=True):
+              s = read(p)
+              if "FluxVisual" in s:
+                  s2 = re.sub(r'\n\s*if \(org\.telegram\.messenger\.FluxVisual\.starsOn\(\)\) \{\n\s*return org\.telegram\.messenger\.FluxVisual\.starsAmount\(\);\n\s*\}\n', "\n", s)
+                  write(p, s2)
+                  ok("StarsController: визуальный баланс отключён")
+
+          # откатываем hide_premium для FluxVisual.premiumOn (SettingsActivity) — больше не завязано на звёзды/интерфейс, оставляем как есть
+          ok("Premium (визуал) и Сохранять чат оставлены без изменений")
+
+          # ============================================================ экран «Свободный режим»
+          free = r"""package org.telegram.ui;
+
+          import android.app.AlertDialog.Builder;
           import android.content.Context;
-          import android.graphics.Typeface;
           import android.graphics.drawable.GradientDrawable;
           import android.text.InputType;
           import android.view.Gravity;
@@ -2174,7 +2332,6 @@ jobs:
           import android.widget.LinearLayout;
           import android.widget.ScrollView;
           import android.widget.TextView;
-          import android.widget.Toast;
 
           import org.telegram.messenger.AndroidUtilities;
           import org.telegram.messenger.FluxVisual;
@@ -2186,17 +2343,16 @@ jobs:
           import org.telegram.ui.Cells.TextCheckCell;
           import org.telegram.ui.Cells.TextSettingsCell;
 
-          public class FluxStarsActivity extends BaseFragment {
+          public class FluxFreeModeActivity extends BaseFragment {
 
-              private TextView balanceView;
-              private EditText input;
+              private LinearLayout giftsCard;
               private TextCheckCell toggle;
 
               @Override
               public View createView(final Context context) {
                   actionBar.setBackButtonImage(R.drawable.ic_ab_back);
                   actionBar.setAllowOverlayTitle(true);
-                  actionBar.setTitle("Звёзды");
+                  actionBar.setTitle("Свободный режим");
                   actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
                       @Override
                       public void onItemClick(int id) {
@@ -2217,102 +2373,95 @@ jobs:
                   scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
                   HeaderCell h1 = new HeaderCell(context);
-                  h1.setText("Баланс звёзд");
+                  h1.setText("Коллекция (визуал, только у вас)");
                   list.addView(h1, matchWrap());
 
                   LinearLayout c1 = card(context, list);
-                  balanceView = new TextView(context);
-                  balanceView.setTextSize(34);
-                  balanceView.setTypeface(Typeface.DEFAULT_BOLD);
-                  balanceView.setGravity(Gravity.CENTER);
-                  balanceView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
-                  balanceView.setPadding(0, AndroidUtilities.dp(22), 0, AndroidUtilities.dp(22));
-                  c1.addView(balanceView, matchWrap());
-
                   toggle = new TextCheckCell(context);
-                  toggle.setTextAndCheck("Показывать этот баланс", FluxVisual.starsOn(), false);
-                  toggle.setOnClickListener(view -> {
-                      FluxVisual.setStars(!FluxVisual.starsOn());
-                      refresh();
+                  toggle.setTextAndCheck("Показывать значок в профиле", FluxVisual.freeModeOn(), false);
+                  toggle.setOnClickListener(v -> {
+                      FluxVisual.setFreeMode(!FluxVisual.freeModeOn());
+                      toggle.setChecked(FluxVisual.freeModeOn());
                   });
                   c1.addView(toggle, matchWrap());
-                  note(list, context, "Только визуал на этом устройстве: баланс виден в разделе звёзд FluxGram. Настоящий баланс аккаунта не меняется, потратить такие звёзды нельзя.");
+                  note(list, context, "Подарки и NFT здесь — локальная витрина: видны только вам на этом устройстве, в саму коллекцию Telegram и другим людям не попадают и не тратят звёзды.");
 
                   HeaderCell h2 = new HeaderCell(context);
-                  h2.setText("Выдать звёзды");
+                  h2.setText("Ваши предметы");
                   list.addView(h2, matchWrap());
+                  giftsCard = card(context, list);
 
-                  LinearLayout c2 = card(context, list);
-                  input = new EditText(context);
-                  input.setInputType(InputType.TYPE_CLASS_NUMBER);
-                  input.setSingleLine(true);
-                  input.setHint("Количество");
-                  input.setText(String.valueOf(FluxVisual.starsAmount()));
-                  input.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
-                  input.setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
-                  input.setBackground(null);
-                  input.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(14), AndroidUtilities.dp(21), AndroidUtilities.dp(14));
-                  c2.addView(input, matchWrap());
+                  TextSettingsCell add = new TextSettingsCell(context);
+                  add.setText("Добавить подарок / NFT", false);
+                  add.setOnClickListener(v -> showAddDialog(context));
+                  list.addView(add, matchWrap());
 
-                  action(c2, context, "Выдать указанное количество", true, view -> {
-                      String t = input.getText().toString().replaceAll("[^0-9]", "");
-                      long v = 0;
-                      if (t.length() > 0) {
-                          try {
-                              v = Long.parseLong(t.length() > 10 ? String.valueOf(FluxVisual.MAX_STARS) : t);
-                          } catch (NumberFormatException e) {
-                              v = 0;
-                          }
-                      }
-                      v = Math.min(v, FluxVisual.MAX_STARS);
-                      FluxVisual.setStarsAmount(v);
-                      FluxVisual.setStars(true);
-                      input.setText(String.valueOf(v));
-                      try {
-                          AndroidUtilities.hideKeyboard(input);
-                      } catch (Throwable ignore) {
-                      }
-                      refresh();
-                      Toast.makeText(context, "Выдано: " + format(v), Toast.LENGTH_SHORT).show();
-                  });
-                  action(c2, context, "+100", true, view -> add(100L));
-                  action(c2, context, "+1 000", true, view -> add(1000L));
-                  action(c2, context, "+10 000", true, view -> add(10000L));
-                  action(c2, context, "+100 000", true, view -> add(100000L));
-                  action(c2, context, "Обнулить", false, view -> {
-                      FluxVisual.setStarsAmount(0);
-                      input.setText("0");
-                      refresh();
-                  });
-
-                  refresh();
+                  refresh(context);
                   return fragmentView;
               }
 
-              private void add(long delta) {
-                  long v = Math.min(FluxVisual.MAX_STARS, FluxVisual.starsAmount() + delta);
-                  FluxVisual.setStarsAmount(v);
-                  FluxVisual.setStars(true);
-                  input.setText(String.valueOf(v));
-                  refresh();
+              private void showAddDialog(Context context) {
+                  LinearLayout box = new LinearLayout(context);
+                  box.setOrientation(LinearLayout.VERTICAL);
+                  box.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(6), AndroidUtilities.dp(21), AndroidUtilities.dp(6));
+
+                  final EditText emoji = new EditText(context);
+                  emoji.setHint("Эмодзи, например \uD83C\uDF81");
+                  emoji.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                  box.addView(emoji, matchWrap());
+
+                  final EditText title = new EditText(context);
+                  title.setHint("Название, например Plush Pepe");
+                  title.setInputType(InputType.TYPE_CLASS_TEXT);
+                  title.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                  box.addView(title, matchWrap());
+
+                  new Builder(context)
+                          .setTitle("Новый предмет")
+                          .setView(box)
+                          .setPositiveButton("Добавить", (d, w) -> {
+                              String e = emoji.getText().toString().trim();
+                              String t = title.getText().toString().trim();
+                              if (e.length() == 0) {
+                                  e = "\uD83C\uDF81";
+                              }
+                              if (t.length() == 0) {
+                                  t = "Подарок";
+                              }
+                              FluxVisual.addGift(e, t);
+                              refresh(context);
+                          })
+                          .setNegativeButton("Отмена", null)
+                          .show();
               }
 
-              private void refresh() {
-                  boolean on = FluxVisual.starsOn();
-                  toggle.setChecked(on);
-                  balanceView.setText("\u2B50 " + format(FluxVisual.starsAmount()));
-                  balanceView.setAlpha(on ? 1f : 0.4f);
-              }
-
-              private static String format(long v) {
-                  return String.format(java.util.Locale.US, "%,d", v).replace(',', ' ');
-              }
-
-              private void action(LinearLayout card, Context context, String title, boolean divider, View.OnClickListener l) {
-                  TextSettingsCell cell = new TextSettingsCell(context);
-                  cell.setText(title, divider);
-                  cell.setOnClickListener(l);
-                  card.addView(cell, matchWrap());
+              private void refresh(Context context) {
+                  giftsCard.removeAllViews();
+                  java.util.List<FluxVisual.Gift> gifts = FluxVisual.getGifts();
+                  if (gifts.isEmpty()) {
+                      TextView empty = new TextView(context);
+                      empty.setText("Пока пусто");
+                      empty.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+                      empty.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(16), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
+                      giftsCard.addView(empty, matchWrap());
+                      return;
+                  }
+                  for (int i = 0; i < gifts.size(); i++) {
+                      final int idx = i;
+                      FluxVisual.Gift g = gifts.get(i);
+                      TextSettingsCell cell = new TextSettingsCell(context);
+                      cell.setText(g.emoji + "  " + g.title, i < gifts.size() - 1);
+                      cell.setOnClickListener(v -> new Builder(context)
+                              .setTitle("Удалить предмет?")
+                              .setMessage(g.emoji + " " + g.title)
+                              .setPositiveButton("Удалить", (d, w) -> {
+                                  FluxVisual.removeGift(idx);
+                                  refresh(context);
+                              })
+                              .setNegativeButton("Отмена", null)
+                              .show());
+                      giftsCard.addView(cell, matchWrap());
+                  }
               }
 
               private LinearLayout.LayoutParams matchWrap() {
@@ -2343,72 +2492,53 @@ jobs:
               }
           }
           """
-          write(ui + "/FluxStarsActivity.java", stars)
-          ok("FluxStarsActivity создан")
+          write(ui + "/FluxFreeModeActivity.java", free)
+          ok("FluxFreeModeActivity создан")
 
-          # ============================================================ экран «Интерфейс Telegram»
-          def ctor_ok(cls, need=None, arg=False):
-              s = read(ui + "/" + cls + ".java")
-              if not s:
-                  return False
-              if need and need not in s:
-                  return False
-              cs = re.findall(r'public\s+' + cls + r'\s*\(([^)]*)\)', s)
-              if not cs:
-                  return not arg
-              if arg:
-                  return any(c.strip().startswith("int ") or c.strip().startswith("int\n") for c in cs)
-              return any(c.strip() == "" for c in cs)
+          # ============================================================ экран «ID и номер»
+          if resolve_ok:
+              cls_req = Q["TL_contacts_resolveUsername"]
+              cls_res = Q["TL_contacts_resolvedPeer"]
+          else:
+              cls_req = cls_res = None
 
-          cands = [
-              ("Оформление и темы", "ThemeActivity", "new ThemeActivity(ThemeActivity.THEME_TYPE_BASIC)", ctor_ok("ThemeActivity", "THEME_TYPE_BASIC", True)),
-              ("Папки с чатами", "FiltersSetupActivity", "new FiltersSetupActivity()", ctor_ok("FiltersSetupActivity")),
-              ("Энергосбережение", "LiteModeSettingsActivity", "new LiteModeSettingsActivity()", ctor_ok("LiteModeSettingsActivity")),
-              ("Уведомления и звуки", "NotificationsSettingsActivity", "new NotificationsSettingsActivity()", ctor_ok("NotificationsSettingsActivity")),
-              ("Данные и память", "DataSettingsActivity", "new DataSettingsActivity()", ctor_ok("DataSettingsActivity")),
-              ("Язык", "LanguageSelectActivity", "new LanguageSelectActivity()", ctor_ok("LanguageSelectActivity")),
-          ]
-          links = [c for c in cands if c[3]]
-          for c in cands:
-              if not c[3]:
-                  warn("Интерфейс: экран %s не найден или другой конструктор, пункт «%s» пропущен" % (c[1], c[0]))
+          idscreen = r"""package org.telegram.ui;
 
-          link_code = ""
-          for i, (title, cls, expr, _) in enumerate(links):
-              div = "true" if i < len(links) - 1 else "false"
-              link_code += ('        TextSettingsCell t%d = new TextSettingsCell(context);\n'
-                            '        t%d.setText("%s", %s);\n'
-                            '        t%d.setOnClickListener(view -> presentFragment(%s));\n'
-                            '        c1.addView(t%d, matchWrap());\n') % (i, i, title, div, i, expr, i)
-
-          iface = r"""package org.telegram.ui;
-
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
           import android.content.Context;
           import android.graphics.drawable.GradientDrawable;
           import android.view.View;
           import android.view.ViewGroup;
+          import android.widget.EditText;
           import android.widget.FrameLayout;
           import android.widget.LinearLayout;
           import android.widget.ScrollView;
           import android.widget.TextView;
+          import android.widget.Toast;
 
           import org.telegram.messenger.AndroidUtilities;
-          import org.telegram.messenger.FluxVisual;
+          import org.telegram.messenger.ConnectionsManager;
+          import org.telegram.messenger.FileLog;
           import org.telegram.messenger.R;
+          import org.telegram.messenger.UserConfig;
+          import org.telegram.tgnet.TLRPC;
           import org.telegram.ui.ActionBar.ActionBar;
           import org.telegram.ui.ActionBar.BaseFragment;
           import org.telegram.ui.ActionBar.Theme;
           import org.telegram.ui.Cells.HeaderCell;
-          import org.telegram.ui.Cells.TextCheckCell;
           import org.telegram.ui.Cells.TextSettingsCell;
 
-          public class FluxInterfaceActivity extends BaseFragment {
+          public class FluxIdActivity extends BaseFragment {
+
+              private LinearLayout resultCard;
+              private TextView resultText;
 
               @Override
               public View createView(final Context context) {
                   actionBar.setBackButtonImage(R.drawable.ic_ab_back);
                   actionBar.setAllowOverlayTitle(true);
-                  actionBar.setTitle("Интерфейс");
+                  actionBar.setTitle("ID и номер");
                   actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
                       @Override
                       public void onItemClick(int id) {
@@ -2428,25 +2558,84 @@ jobs:
                   list.setOrientation(LinearLayout.VERTICAL);
                   scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+                  HeaderCell h0 = new HeaderCell(context);
+                  h0.setText("Ваш аккаунт");
+                  list.addView(h0, matchWrap());
+                  LinearLayout c0 = card(context, list);
+                  TextSettingsCell self = new TextSettingsCell(context);
+                  long selfId = UserConfig.getInstance(currentAccount).getClientUserId();
+                  self.setText("ID: " + selfId, false);
+                  self.setOnClickListener(v -> copy(context, String.valueOf(selfId)));
+                  c0.addView(self, matchWrap());
+
                   HeaderCell h1 = new HeaderCell(context);
-                  h1.setText("Настройки Telegram");
+                  h1.setText("Найти по @username");
                   list.addView(h1, matchWrap());
                   LinearLayout c1 = card(context, list);
-          @LINKS@
-                  HeaderCell h2 = new HeaderCell(context);
-                  h2.setText("Интерфейс FluxGram");
-                  list.addView(h2, matchWrap());
-                  LinearLayout c2 = card(context, list);
-                  final TextCheckCell hide = new TextCheckCell(context);
-                  hide.setTextAndCheck("Скрыть Premium в настройках", FluxVisual.hidePremium(), false);
-                  hide.setOnClickListener(view -> {
-                      boolean on = !FluxVisual.hidePremium();
-                      FluxVisual.setHidePremium(on);
-                      hide.setChecked(on);
-                  });
-                  c2.addView(hide, matchWrap());
-                  note(list, context, "Применяется при следующем открытии настроек. Если включён «Premium бесплатно (визуал)», пункт Premium остаётся видимым.");
+                  final EditText input = new EditText(context);
+                  input.setHint("@username (человек, бот, чат, канал)");
+                  input.setSingleLine(true);
+                  input.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                  input.setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+                  input.setBackground(null);
+                  input.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(14), AndroidUtilities.dp(21), AndroidUtilities.dp(14));
+                  c1.addView(input, matchWrap());
+
+                  TextSettingsCell go = new TextSettingsCell(context);
+                  go.setText("Найти", false);
+                  go.setOnClickListener(v -> resolve(context, input.getText().toString().trim()));
+                  c1.addView(go, matchWrap());
+
+                  resultCard = card(context, list);
+                  resultText = new TextView(context);
+                  resultText.setTextIsSelectable(true);
+                  resultText.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                  resultText.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(16), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
+                  resultText.setText("Результат появится здесь");
+                  resultCard.addView(resultText, matchWrap());
+
+                  note(list, context, "Номер телефона показывается, только если собеседник не скрыл его в настройках приватности: Telegram просто не передаёт клиенту скрытый номер, обойти это нельзя.");
                   return fragmentView;
+              }
+
+              private void resolve(Context context, String raw) {
+                  String username = raw.startsWith("@") ? raw.substring(1) : raw;
+                  if (username.length() == 0) {
+                      resultText.setText("Введите @username");
+                      return;
+                  }
+          RESOLVE_BODY
+              }
+
+              private void showResult(TLRPC.User u, TLRPC.Chat chat) {
+                  StringBuilder sb = new StringBuilder();
+                  if (u != null) {
+                      sb.append(u.bot ? "Бот\n" : "Пользователь\n");
+                      sb.append("ID: ").append(u.id).append('\n');
+                      if (u.username != null) {
+                          sb.append("@").append(u.username).append('\n');
+                      }
+                      if (u.phone != null && u.phone.length() > 0) {
+                          sb.append("Телефон: +").append(u.phone).append('\n');
+                      } else {
+                          sb.append("Телефон: скрыт или недоступен\n");
+                      }
+                  } else if (chat != null) {
+                      sb.append(chat.megagroup ? "Супергруппа\n" : (chat.broadcast ? "Канал\n" : "Группа\n"));
+                      sb.append("ID: ").append(-chat.id).append('\n');
+                      if (chat.username != null) {
+                          sb.append("@").append(chat.username).append('\n');
+                      }
+                  }
+                  resultText.setText(sb.toString().trim());
+              }
+
+              private void copy(Context context, String text) {
+                  ClipboardManager cm = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
+                  if (cm != null) {
+                      cm.setPrimaryClip(ClipData.newPlainText("id", text));
+                      Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show();
+                  }
               }
 
               private LinearLayout.LayoutParams matchWrap() {
@@ -2477,154 +2666,141 @@ jobs:
               }
           }
           """
-          if links:
-              iface = iface.replace("@LINKS@", link_code)
+          if resolve_ok:
+              resolve_body = ("        " + cls_req + " req = new " + cls_req + "();\n"
+                               "        req.username = username;\n"
+                               "        resultText.setText(\"Ищу...\");\n"
+                               "        getConnectionsManager().sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {\n"
+                               "            if (error != null || !(response instanceof " + cls_res + ")) {\n"
+                               "                resultText.setText(\"Не найдено: \" + (error != null ? error.text : \"нет ответа\"));\n"
+                               "                return;\n"
+                               "            }\n"
+                               "            " + cls_res + " res = (" + cls_res + ") response;\n"
+                               "            TLRPC.User u = res.users.isEmpty() ? null : res.users.get(0);\n"
+                               "            TLRPC.Chat chat = res.chats.isEmpty() ? null : res.chats.get(0);\n"
+                               "            showResult(u, chat);\n"
+                               "        }));\n")
           else:
-              iface = iface.replace("@LINKS@", "")
-          write(ui + "/FluxInterfaceActivity.java", iface)
-          ok("FluxInterfaceActivity создан (ссылок на экраны Telegram: %d)" % len(links))
+              resolve_body = ("        resultText.setText(\"Поиск по username недоступен в этой сборке (нет TL_contacts_resolveUsername)\");\n")
+          idscreen = idscreen.replace("RESOLVE_BODY\n", resolve_body)
+          write(ui + "/FluxIdActivity.java", idscreen)
+          if resolve_ok:
+              ok("FluxIdActivity создан (поиск по username через %s)" % cls_req)
+          else:
+              warn("FluxIdActivity создан, но TL_contacts_resolveUsername не найден в схеме — поиск по username недоступен, виден только свой ID")
 
-          # ============================================================ строки в хабе «Настройки FluxGram»
+          # ============================================================ перестраиваем хаб «Настройки FluxGram»
           hub_p = ui + "/FluxHubActivity.java"
           hub = read(hub_p)
           if not hub:
-              warn("FluxHubActivity.java не найден, новые пункты в «Настройки FluxGram» не добавлены")
-          elif "FluxStarsActivity" in hub:
-              ok("FluxHub: уже пропатчен")
+              warn("FluxHubActivity.java не найден, пункты не добавлены")
           else:
-              hub = hub.replace('spy.setText("Шпион", false);', 'spy.setText("Шпион", true);', 1)
-              m = re.search(r'\n([ \t]*)c\.addView\(spy,[^\n]*\);', hub)
-              if not m:
-                  warn("FluxHub: не нашёл c.addView(spy, ...), пункты не добавлены")
+              # убираем прежние ссылки на Звёзды / Интерфейс Telegram
+              before = hub
+              hub = re.sub(r'\n\s*TextSettingsCell fluxStars = new TextSettingsCell\(context\);.*?c\.addView\(fluxStars,[^\n]*\);\n', "\n", hub, flags=re.S)
+              hub = re.sub(r'\n\s*TextSettingsCell fluxIface = new TextSettingsCell\(context\);.*?c\.addView\(fluxIface,[^\n]*\);\n', "\n", hub, flags=re.S)
+              removed = hub != before
+              if "FluxFreeModeActivity" in hub and "FluxIdActivity" in hub:
+                  ok("FluxHub: пункты Свободный режим / ID и номер уже добавлены")
               else:
-                  i = m.group(1)
-                  LP = "new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)"
-                  def link(var, title, cls):
-                      return ("\n" + i + "TextSettingsCell " + var + " = new TextSettingsCell(context);"
-                              "\n" + i + var + ".setText(\"" + title + "\", true);"
-                              "\n" + i + var + ".setOnClickListener(view -> presentFragment(new " + cls + "()));"
-                              "\n" + i + "c.addView(" + var + ", " + LP + ");")
-                  def check(var, title, getter, setter, last):
-                      return ("\n" + i + "final TextCheckCell " + var + " = new TextCheckCell(context);"
-                              "\n" + i + var + ".setTextAndCheck(\"" + title + "\", FluxVisual." + getter + "(), " + ("false" if last else "true") + ");"
-                              "\n" + i + var + ".setOnClickListener(view -> {"
-                              "\n" + i + "    boolean on = !FluxVisual." + getter + "();"
-                              "\n" + i + "    FluxVisual." + setter + "(on);"
-                              "\n" + i + "    " + var + ".setChecked(on);"
-                              "\n" + i + "});"
-                              "\n" + i + "c.addView(" + var + ", " + LP + ");")
-                  add = (link("fluxStars", "Звёзды", "FluxStarsActivity") +
-                         link("fluxIface", "Интерфейс Telegram", "FluxInterfaceActivity") +
-                         check("fluxPremium", "Premium бесплатно (визуал)", "premiumOn", "setPremium", False) +
-                         check("fluxKeep", "Сохранять чат после удаления", "keepChat", "setKeepChat", True))
-                  hub = hub[:m.end()] + add + hub[m.end():]
-                  for imp in ("import org.telegram.messenger.FluxVisual;", "import org.telegram.ui.Cells.TextCheckCell;"):
-                      if imp not in hub:
-                          hub = re.sub(r'(?m)^(package [^\n]+;\n)', lambda mm: mm.group(1) + "\n" + imp + "\n", hub, count=1)
-                  write(hub_p, hub)
-                  ok("FluxHub: пункты Звёзды, Интерфейс Telegram, Premium (визуал), Сохранять чат")
-
-          # ============================================================ UserConfig.isPremium: premium только визуально
-          p = msg + "/UserConfig.java"
-          s = read(p)
-          pat = re.compile(r'(public\s+boolean\s+isPremium\s*\(\s*\)\s*\{\n)')
-          if "FluxVisual" in s:
-              ok("UserConfig: уже пропатчен")
-          elif len(pat.findall(s)) >= 1:
-              s = pat.sub(lambda m: m.group(1) + "        if (FluxVisual.premiumOn() && getCurrentUser() != null) {\n            return true;\n        }\n", s, count=1)
-              write(p, s)
-              ok("UserConfig.isPremium: визуальный Premium")
-          else:
-              warn("UserConfig.java: isPremium() не найден, визуальный Premium не подключён")
-
-          # ============================================================ MessagesController.putUser: свой профиль с флагом premium
-          p = msg + "/MessagesController.java"
-          s = read(p)
-          pat = re.compile(r'(public\s+boolean\s+putUser\s*\(\s*(?:final\s+)?TLRPC\.User\s+(\w+)\s*,\s*boolean\s+\w+[^)]*\)\s*\{\n)')
-          if "FluxVisual.onPutUser" in s:
-              ok("MessagesController.putUser: уже пропатчен")
-          else:
-              s, n = pat.subn(lambda m: m.group(1) + "        FluxVisual.onPutUser(" + m.group(2) + ", getUserConfig().getClientUserId());\n", s)
-              if n:
-                  write(p, s)
-                  ok("MessagesController.putUser: флаг premium для своего профиля (мест: %d)" % n)
-              else:
-                  warn("MessagesController.putUser не найден, значок Premium у своего профиля может мигать")
-
-          # ============================================================ Пункт Premium в настройках остаётся видимым при визуальном Premium
-          p = ui + "/SettingsActivity.java"
-          s = read(p)
-          old = '.getBoolean("hide_premium", true);'
-          if "FluxVisual.premiumOn()" in s:
-              ok("SettingsActivity: hide_premium уже учитывает визуальный Premium")
-          elif old in s:
-              s = s.replace(old, '.getBoolean("hide_premium", true) && !org.telegram.messenger.FluxVisual.premiumOn();', 1)
-              write(p, s)
-              ok("SettingsActivity: Premium-пункт виден при визуальном Premium")
-          else:
-              warn("SettingsActivity: не нашёл fluxHidePremium, пункт Premium останется скрытым")
-
-          # ============================================================ StarsController: визуальный баланс
-          import glob
-          cands_s = glob.glob(base + "/**/StarsController.java", recursive=True)
-          if not cands_s:
-              warn("StarsController.java не найден, визуальный баланс звёзд не подключён")
-          else:
-              p = cands_s[0]
-              s = read(p)
-              pat = re.compile(r'(public\s+long\s+getBalance\s*\([^)]*\)\s*\{\n)')
-              if "FluxVisual" in s:
-                  ok("StarsController: уже пропатчен")
-              else:
-                  s, n = pat.subn(lambda m: m.group(1) + "        if (org.telegram.messenger.FluxVisual.starsOn()) {\n            return org.telegram.messenger.FluxVisual.starsAmount();\n        }\n", s)
-                  if n:
-                      write(p, s)
-                      ok("StarsController.getBalance: визуальный баланс (методов: %d)" % n)
+                  m = re.search(r'\n([ \t]*)c\.addView\(spy,[^\n]*\);', hub)
+                  if not m:
+                      warn("FluxHub: не нашёл c.addView(spy, ...), новые пункты не добавлены")
                   else:
-                      warn("StarsController: getBalance() с типом long не найден, звёзды в интерфейсе не изменятся")
+                      i = m.group(1)
+                      LP = "new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)"
+                      def link(var, title, cls, last):
+                          div = "false" if last else "true"
+                          return ("\n" + i + "TextSettingsCell " + var + " = new TextSettingsCell(context);"
+                                  "\n" + i + var + ".setText(\"" + title + "\", " + div + ");"
+                                  "\n" + i + var + ".setOnClickListener(view -> presentFragment(new " + cls + "()));"
+                                  "\n" + i + "c.addView(" + var + ", " + LP + ");")
+                      add = link("fluxFree", "Свободный режим", "FluxFreeModeActivity", False) + link("fluxId", "ID и номер", "FluxIdActivity", True)
+                      hub = hub[:m.end()] + add + hub[m.end():]
+                      if removed:
+                          ok("FluxHub: убраны пункты Звёзды и Интерфейс Telegram")
+                      ok("FluxHub: добавлены пункты Свободный режим и ID и номер")
+                      write(hub_p, hub)
 
-          # ============================================================ Сохранение чата: секретный чат, закрытый собеседником
+          # ============================================================ своя коллекция в профиле (только у себя): значок рядом с ником
+          p = ui + "/ProfileActivity.java"
+          s = read(p)
+          anchor = ('} else if (FluxBadge.isFluxUser(user.id, userInfo != null ? userInfo.about : null)) {\n'
+                    '                    nameTextView.setRightDrawable2(FluxBadge.drawableAnimated(getContext()));\n'
+                    '                    nameTextViewRightDrawable2ContentDescription = "FluxGram";\n'
+                    '                } else {')
+          if "FluxVisual.freeModeOn" in s:
+              ok("ProfileActivity: значок коллекции уже подключён")
+          elif anchor in s:
+              insert = ('} else if (FluxVisual.freeModeOn() && FluxVisual.isSelf(user.id) && FluxVisual.giftCount() > 0) {\n'
+                        '                    nameTextView.setRightDrawable2(FluxVisual.giftBadge(getContext()));\n'
+                        '                    nameTextViewRightDrawable2ContentDescription = "Коллекция FluxGram: " + FluxVisual.giftCount();\n'
+                        '                ' + anchor)
+              s = s.replace(anchor, insert, 1)
+              s = add_import(s, "import org.telegram.messenger.FluxVisual;")
+              write(p, s)
+              ok("ProfileActivity: значок коллекции рядом с ником в своём профиле (тап открывает «Свободный режим»)")
+          else:
+              warn("ProfileActivity: якорь FluxBadge.isFluxUser не найден, значок коллекции не подключён")
+
+          # открытие «Свободный режим» по тапу на значок — используем уже существующий обработчик клика по бейджу, если он есть
+          p2 = ui + "/ProfileActivity.java"
+          s2 = read(p2)
+          pat = re.compile(r'nameTextView\.setRightDrawable2OnClickListener\(')
+          if pat.search(s2):
+              ok("ProfileActivity: обработчик клика по значку уже есть, оставлен как есть")
+          else:
+              warn("ProfileActivity: отдельного клика по значку коллекции нет, открыть «Свободный режим» можно только из «Настройки FluxGram»")
+
+          # ============================================================ затемнение удалённых сообщений (как в AyuGram)
+          p = ui + "/Cells/ChatMessageCell.java"
+          s = read(p)
+          anchor = "timeString = org.telegram.messenger.SpyMode.decorateTime(currentMessageObject, timeString);"
+          if "SpyMode.isDeleted(currentMessageObject) ? org.telegram.messenger.FluxVisual.DIM_ALPHA" in s:
+              ok("ChatMessageCell: затемнение уже подключено")
+          elif anchor in s:
+              s = s.replace(anchor, anchor + "\n        setAlpha(org.telegram.messenger.SpyMode.isDeleted(currentMessageObject) ? org.telegram.messenger.FluxVisual.DIM_ALPHA : 1f);", 1)
+              write(p, s)
+              ok("ChatMessageCell: удалённые сообщения затемняются (alpha %.2f)" % 0.45)
+          else:
+              warn("ChatMessageCell: не нашёл строку decorateTime — затемнение удалённых сообщений не подключено")
+
+          # ============================================================ затемнение диалога, удалённого/покинутого со стороны собеседника
           p = msg + "/SecretChatHelper.java"
           s = read(p)
-          pat = re.compile(r'(TL_encryptedChatDiscarded\s*&&\s*\w+\.history_deleted)')
-          if "FluxVisual.keepChat" in s:
-              ok("SecretChatHelper: уже пропатчен")
+          anchor2 = "if (newChat instanceof TLRPC.TL_encryptedChatDiscarded && newChat.history_deleted && !FluxVisual.keepChat()) {"
+          if "FluxVisual.markRemovedDialog" in s:
+              ok("SecretChatHelper: пометка удалённого диалога уже подключена")
+          elif anchor2 in s:
+              mark = ("if (newChat instanceof TLRPC.TL_encryptedChatDiscarded && newChat.history_deleted && FluxVisual.keepChat()) {\n"
+                      "            FluxVisual.markRemovedDialog(DialogObject.makeEncryptedDialogId(newChat.id));\n"
+                      "        }\n        ")
+              s = s.replace(anchor2, mark + anchor2, 1)
+              write(p, s)
+              ok("SecretChatHelper: секретный чат, закрытый собеседником, помечен для затемнения")
           else:
-              s, n = pat.subn(lambda m: m.group(1) + " && !FluxVisual.keepChat()", s)
-              if n:
-                  write(p, s)
-                  ok("SecretChatHelper: секретный чат не удаляется, когда его закрыл собеседник (мест: %d)" % n)
+              warn("SecretChatHelper: не нашёл патч «Сохранять чат» из прошлого шага, затемнение секретных чатов не подключено")
+
+          # ============================================================ применяем затемнение в списке чатов
+          cands = glob.glob(ui + "/Cells/DialogCell.java")
+          if not cands:
+              warn("DialogCell.java не найден, затемнение в списке чатов не подключено")
+          else:
+              p = cands[0]
+              s = read(p)
+              pat = re.compile(r'(public\s+void\s+setDialog\s*\(\s*(?:final\s+)?TLRPC\.Dialog\s+(\w+)[^)]*\)\s*\{\n)')
+              if "FluxVisual.isRemovedDialog" in s:
+                  ok("DialogCell: затемнение уже подключено")
               else:
-                  warn("SecretChatHelper: якорь discarded+history_deleted не найден, секретные чаты удаляются как раньше")
-
-          # ============================================================ Сохранение чата: удалённые собеседником сообщения в обычных чатах
-          p = msg + "/SpyMode.java"
-          s = read(p)
-          old = "boolean keepDeleted = get(KEY_DELETED);"
-          if "FluxVisual.keepChat()" in s:
-              ok("SpyMode: уже пропатчен")
-          elif old in s:
-              s = s.replace(old, "boolean keepDeleted = get(KEY_DELETED) || FluxVisual.keepChat();", 1)
-              write(p, s)
-              ok("SpyMode: «Сохранять чат» включает хранение удалённого собеседником и в обычных чатах")
-          else:
-              warn("SpyMode: не нашёл keepDeleted, обычные чаты сохраняются только по настройке «Шпион»")
-
-          # ============================================================ Автозапуск: применить визуальный Premium при старте
-          p = msg + "/ApplicationLoader.java"
-          s = read(p)
-          pat = re.compile(r'(public void onCreate\(\)\s*\{\n)')
-          if "FluxVisual.startup" in s:
-              ok("ApplicationLoader: автозапуск FluxVisual уже подключён")
-          elif len(pat.findall(s)) == 1:
-              s = pat.sub(lambda m: m.group(1) + "        FluxVisual.startup();\n", s, count=1)
-              write(p, s)
-              ok("ApplicationLoader: автозапуск FluxVisual")
-          else:
-              warn("ApplicationLoader.onCreate не найден, Premium (визуал) применится при первом переключении")
+                  s, n = pat.subn(lambda m: m.group(1) + "        setAlpha(org.telegram.messenger.FluxVisual.isRemovedDialog(" + m.group(2) + ".id) ? org.telegram.messenger.FluxVisual.DIM_ALPHA : 1f);\n", s)
+                  if n:
+                      write(p, s)
+                      ok("DialogCell: диалог, удалённый/покинутый собеседником, затемняется в списке (мест: %d)" % n)
+                  else:
+                      warn("DialogCell: сигнатура setDialog(TLRPC.Dialog ...) не найдена, затемнение в списке чатов не подключено")
 
           with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
-              f.write("## FluxGram: звёзды, интерфейс, Premium (визуал), сохранение чата\n```\n" + "\n".join(report) + "\n```\n")
+              f.write("## FluxGram v2: затемнение удалённого, Свободный режим, ID и номер (без звёзд/интерфейса)\n```\n" + "\n".join(report) + "\n```\n")
           PY
 
       - name: API ключи (необязательно, из secrets APP_ID / APP_HASH)
