@@ -3611,27 +3611,29 @@ jobs:
               write(p, s)
               ok("MessagesController: «галочка» официального канала в списках чатов")
 
-          # 6. Настройки: пункт «Темы FluxGram» рядом с «Настройки FluxGram»
+          # 6. Настройки: пункт «Темы FluxGram». id берём свободный, чтобы не конфликтовать с другими пунктами
           p = SRC + "ui/SettingsActivity.java"
           s = read(p)
           if "FluxThemesActivity" in s:
               ok("SettingsActivity: уже пропатчен")
           else:
+              used = set(int(x) for x in re.findall(r'Factory\.of\((\d+),', s)) | set(int(x) for x in re.findall(r'case (\d+):', s))
+              new_id = max(used | {0}) + 1
               m = re.search(r'\n([ \t]*)items\.add\(SettingCell\.Factory\.of\(28,[^\n]*\);', s)
               mc = re.search(r'\n([ \t]*)case 24:', s)
               if not m or not mc:
-                  warn("SettingsActivity.java: нет пункта «Настройки FluxGram» (id 28) или case 24, раздел «Темы FluxGram» не добавлен")
+                  warn("SettingsActivity.java: нет пункта id 28 или case 24, раздел «Темы FluxGram» не добавлен")
               else:
                   ind = m.group(1)
-                  item = '\n' + ind + 'items.add(SettingCell.Factory.of(29, 0xFF2FC6A8, 0xFF1D9E86, R.drawable.settings_fluxgram_themes, "Темы FluxGram"));'
+                  item = ('\n' + ind + 'items.add(SettingCell.Factory.of(%d, 0xFF2FC6A8, 0xFF1D9E86, R.drawable.settings_fluxgram_themes, "Темы FluxGram"));' % new_id)
                   s = s[:m.end()] + item + s[m.end():]
                   mc = re.search(r'\n([ \t]*)case 24:', s)
                   ind2 = mc.group(1)
-                  click = ('\n' + ind2 + 'case 29: {' + '\n' + ind2 + '    presentFragment(new FluxThemesActivity());' +
+                  click = ('\n' + ind2 + 'case %d: {' % new_id + '\n' + ind2 + '    presentFragment(new FluxThemesActivity());' +
                            '\n' + ind2 + '    break;' + '\n' + ind2 + '}')
                   s = s[:mc.start()] + click + s[mc.start():]
                   write(p, s)
-                  ok("SettingsActivity: пункт «Темы FluxGram»")
+                  ok("SettingsActivity: пункт «Темы FluxGram» (id %d)" % new_id)
 
           with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
               f.write("## Патчи FluxGram (значок, официальный канал, темы)\n```\n" + "\n".join(report) + "\n```\n")
