@@ -40,6 +40,10 @@ on:
         description: "FluxGram: тема Material You 3 включена по умолчанию (Android 12+)"
         type: boolean
         default: true
+      badge_particles:
+        description: "FluxGram: частицы вокруг значка рядом с ником"
+        type: boolean
+        default: true
 
 env:
   APP_NAME: FluxGram
@@ -52,6 +56,7 @@ env:
   GHOST_STORIES: ${{ inputs.ghost_stories }}
   GHOST_OFFLINE: ${{ inputs.ghost_offline }}
   MATERIAL_YOU: ${{ inputs.material_you }}
+  BADGE_PARTICLES: ${{ inputs.badge_particles }}
 
 defaults:
   run:
@@ -2413,13 +2418,102 @@ jobs:
           print("flux_badge.webp создан")
           PY
 
-      - name: FluxGram - Java-классы (значок и Material You)
+      - name: FluxGram - Java-классы (значок с частицами и Material You)
         env:
           MATERIAL_YOU: ${{ inputs.material_you }}
+          BADGE_PARTICLES: ${{ inputs.badge_particles }}
         run: |
           set -e
           D=TMessagesProj/src/main/java/org/telegram/messenger
           mkdir -p "$D"
+
+          cat > "$D/FluxBadgeDrawable.java" <<'JAVA'
+          package org.telegram.messenger;
+
+          import android.content.Context;
+          import android.graphics.Canvas;
+          import android.graphics.ColorFilter;
+          import android.graphics.Paint;
+          import android.graphics.Path;
+          import android.graphics.PixelFormat;
+          import android.graphics.Rect;
+          import android.graphics.drawable.Drawable;
+          import android.os.SystemClock;
+
+          // Значок FluxGram с частицами: искры вращаются вокруг значка и мерцают
+          public class FluxBadgeDrawable extends Drawable {
+
+              private static final boolean PARTICLES = FLUX_PARTICLES_DEFAULT;
+              private static final int N = 9;
+              private static final int[] COLORS = {0xFF7FD6FF, 0xFFFFFFFF, 0xFFB388FF, 0xFF8CF0D0};
+
+              private final Drawable icon;
+              private final boolean animated;
+              private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Path star = new Path();
+              private final int size;
+
+              public FluxBadgeDrawable(Context ctx, boolean animated) {
+                  this.icon = ctx.getResources().getDrawable(R.drawable.flux_badge).mutate();
+                  this.animated = animated && PARTICLES;
+                  this.size = AndroidUtilities.dp(22);
+                  setBounds(0, 0, size, size);
+              }
+
+              @Override
+              public void draw(Canvas canvas) {
+                  Rect b = getBounds();
+                  float cx = b.exactCenterX();
+                  float cy = b.exactCenterY();
+                  float s = Math.min(b.width(), b.height());
+                  int half = (int) (s * 0.32f);
+                  icon.setBounds((int) cx - half, (int) cy - half, (int) cx + half, (int) cy + half);
+                  icon.draw(canvas);
+                  if (!PARTICLES) {
+                      return;
+                  }
+                  float t = animated ? (SystemClock.uptimeMillis() % 7000L) / 7000f : 0.2f;
+                  for (int i = 0; i < N; i++) {
+                      float dir = (i % 2 == 0) ? 1f : -1f;
+                      float angle = (float) (2 * Math.PI * (i / (float) N + t * dir * (0.7f + 0.15f * (i % 3))));
+                      float pulse = (float) Math.sin(2 * Math.PI * (t * 2f + i / (float) N));
+                      float r = s * (0.40f + 0.06f * pulse);
+                      float px = cx + (float) Math.cos(angle) * r;
+                      float py = cy + (float) Math.sin(angle) * r;
+                      float tw = 0.35f + 0.65f * Math.abs(pulse);
+                      paint.setColor(COLORS[i % COLORS.length]);
+                      paint.setAlpha((int) (255 * tw));
+                      float pr = AndroidUtilities.dpf2(0.7f + 0.5f * (i % 3)) * (0.7f + 0.5f * tw);
+                      if (i % 3 == 0) {
+                          drawStar(canvas, px, py, pr * 2.2f);
+                      } else {
+                          canvas.drawCircle(px, py, pr, paint);
+                      }
+                  }
+                  if (animated) {
+                      invalidateSelf();
+                  }
+              }
+
+              private void drawStar(Canvas c, float x, float y, float r) {
+                  star.reset();
+                  star.moveTo(x, y - r);
+                  star.quadTo(x, y, x + r, y);
+                  star.quadTo(x, y, x, y + r);
+                  star.quadTo(x, y, x - r, y);
+                  star.quadTo(x, y, x, y - r);
+                  star.close();
+                  c.drawPath(star, paint);
+              }
+
+              @Override public int getIntrinsicWidth() { return size; }
+              @Override public int getIntrinsicHeight() { return size; }
+              @Override public void setAlpha(int alpha) { icon.setAlpha(alpha); }
+              @Override public void setColorFilter(ColorFilter cf) { }
+              @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+          }
+          JAVA
+
           cat > "$D/FluxBadge.java" <<'JAVA'
           package org.telegram.messenger;
 
@@ -2449,17 +2543,32 @@ jobs:
                   return about != null && about.contains(MARK);
               }
 
+              // Свой аккаунт всегда с значком (не ждём загрузки профиля), чужие — по метке
+              public static boolean isFluxUser(long userId, String about) {
+                  if (isSelf(userId) && enabled()) {
+                      return true;
+                  }
+                  return isFluxUser(about);
+              }
+
+              public static boolean isSelf(long userId) {
+                  return userId != 0 && userId == UserConfig.getInstance(UserConfig.selectedAccount).getClientUserId();
+              }
+
               public static boolean enabled() {
                   SharedPreferences p = ApplicationLoader.applicationContext
                           .getSharedPreferences("fluxgram_prefs", Context.MODE_PRIVATE);
                   return p.getBoolean("flux_badge", true);
               }
 
+              // Статичный вариант для списков (ImageSpan не умеет анимироваться)
               public static Drawable drawable(Context ctx) {
-                  Drawable d = ctx.getResources().getDrawable(R.drawable.flux_badge).mutate();
-                  int s = AndroidUtilities.dp(16);
-                  d.setBounds(0, 0, s, s);
-                  return d;
+                  return new FluxBadgeDrawable(ctx, false);
+              }
+
+              // Анимированный вариант с частицами для заголовков (SimpleTextView / профиль)
+              public static Drawable drawableAnimated(Context ctx) {
+                  return new FluxBadgeDrawable(ctx, true);
               }
 
               public static void showInfo(Context ctx) {
@@ -2472,12 +2581,21 @@ jobs:
                       return name;
                   }
                   init(UserConfig.selectedAccount);
-                  TLRPC.UserFull f = MessagesController.getInstance(UserConfig.selectedAccount).getUserFull(user.id);
-                  if (f == null || !isFluxUser(f.about)) {
+                  String about = null;
+                  if (!isSelf(user.id)) {
+                      TLRPC.UserFull f = MessagesController.getInstance(UserConfig.selectedAccount).getUserFull(user.id);
+                      about = f == null ? null : f.about;
+                  }
+                  if (!isFluxUser(user.id, about)) {
                       return name;
                   }
+                  return append(ctx, name);
+              }
+
+              public static CharSequence append(Context ctx, CharSequence name) {
                   SpannableStringBuilder sb = new SpannableStringBuilder(name).append(" \uFFFC");
-                  sb.setSpan(new ImageSpan(drawable(ctx), ImageSpan.ALIGN_BASELINE),
+                  Drawable d = drawable(ctx);
+                  sb.setSpan(new ImageSpan(d, ImageSpan.ALIGN_BASELINE),
                           sb.length() - 1, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                   return sb;
               }
@@ -2521,7 +2639,6 @@ jobs:
                       return;
                   }
                   try {
-                      // Имя класса запроса отличается между версиями форков, поэтому через reflection
                       Class<?> cls;
                       try {
                           cls = Class.forName("org.telegram.tgnet.tl.TL_account$updateProfile");
@@ -2550,6 +2667,7 @@ jobs:
               }
           }
           JAVA
+
           cat > "$D/FluxFeatures.java" <<'JAVA'
           package org.telegram.messenger;
 
@@ -2557,8 +2675,11 @@ jobs:
           import android.content.SharedPreferences;
           import android.content.res.Configuration;
           import android.os.Build;
+          import android.util.SparseArray;
 
           import org.telegram.ui.ActionBar.Theme;
+
+          import java.lang.reflect.Field;
 
           public final class FluxFeatures {
 
@@ -2567,10 +2688,17 @@ jobs:
               // Роли Material You 3: системные цвета для тёмной и светлой темы
               public enum Role {
                   PRIMARY(android.R.color.system_accent1_200, android.R.color.system_accent1_600),
-                  ON_PRIMARY(android.R.color.system_accent1_900, android.R.color.system_neutral1_0),
-                  PRIMARY_CONTAINER(android.R.color.system_accent1_800, android.R.color.system_accent1_100),
+                  ON_PRIMARY(android.R.color.system_accent1_800, android.R.color.system_neutral1_0),
+                  PRIMARY_CONTAINER(android.R.color.system_accent1_700, android.R.color.system_accent1_100),
                   ON_PRIMARY_CONTAINER(android.R.color.system_accent1_100, android.R.color.system_accent1_900),
+                  SECONDARY_CONTAINER(android.R.color.system_accent2_700, android.R.color.system_accent2_100),
+                  ON_SECONDARY_CONTAINER(android.R.color.system_accent2_100, android.R.color.system_accent2_900),
+                  TERTIARY(android.R.color.system_accent3_200, android.R.color.system_accent3_600),
+                  TERTIARY_CONTAINER(android.R.color.system_accent3_700, android.R.color.system_accent3_100),
+                  ON_TERTIARY_CONTAINER(android.R.color.system_accent3_100, android.R.color.system_accent3_900),
                   SURFACE(android.R.color.system_neutral1_900, android.R.color.system_neutral1_10),
+                  SURFACE_CONTAINER(android.R.color.system_neutral1_800, android.R.color.system_neutral1_50),
+                  SURFACE_CONTAINER_HIGH(android.R.color.system_neutral2_800, android.R.color.system_neutral2_100),
                   ON_SURFACE(android.R.color.system_neutral1_100, android.R.color.system_neutral1_900),
                   SURFACE_VARIANT(android.R.color.system_neutral2_800, android.R.color.system_neutral2_100),
                   ON_SURFACE_VARIANT(android.R.color.system_neutral2_200, android.R.color.system_neutral2_700),
@@ -2586,6 +2714,7 @@ jobs:
               }
 
               private static Boolean materialYouCache;
+              private static SparseArray<Role> map;
 
               private static SharedPreferences prefs(Context c) {
                   return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
@@ -2616,41 +2745,96 @@ jobs:
                   return c.getResources().getColor(isDark(c) ? role.dark : role.light, c.getTheme());
               }
 
+              private static void put(String[] names, Role role) {
+                  for (String n : names) {
+                      try {
+                          Field f = Theme.class.getField(n);
+                          if (f.getType() == int.class) {
+                              map.put(f.getInt(null), role);
+                          }
+                      } catch (Throwable ignore) {
+                          // такого ключа нет в этой версии Telegram — пропускаем
+                      }
+                  }
+              }
+
+              // Таблица «ключ Telegram → роль M3». Ключи ищутся по имени, отсутствующие пропускаются
+              private static synchronized SparseArray<Role> table() {
+                  if (map != null) {
+                      return map;
+                  }
+                  map = new SparseArray<>();
+                  // Поверхности
+                  put(new String[]{"key_actionBarDefault", "key_windowBackgroundWhite", "key_dialogBackground",
+                          "key_chat_messagePanelBackground", "key_chats_menuBackground",
+                          "key_actionBarDefaultSubmenuBackground", "key_chat_emojiPanelBackground"}, Role.SURFACE);
+                  put(new String[]{"key_windowBackgroundGray", "key_dialogBackgroundGray",
+                          "key_actionBarDefaultSelector", "key_listSelector"}, Role.SURFACE_VARIANT);
+                  put(new String[]{"key_graySection", "key_chats_pinnedOverlay", "key_chat_inBubble",
+                          "key_chat_inBubbleSelected", "key_chat_emojiSearchBackground"}, Role.SURFACE_CONTAINER_HIGH);
+                  // Текст и иконки
+                  put(new String[]{"key_actionBarDefaultTitle", "key_actionBarDefaultIcon", "key_windowBackgroundWhiteBlackText",
+                          "key_dialogTextBlack", "key_chats_name", "key_chats_menuName", "key_chat_messagePanelText",
+                          "key_chat_messageTextIn", "key_actionBarDefaultSubmenuItem", "key_actionBarTabUnactiveText"}, Role.ON_SURFACE);
+                  put(new String[]{"key_windowBackgroundWhiteGrayText", "key_windowBackgroundWhiteGrayText2",
+                          "key_windowBackgroundWhiteGrayText3", "key_chats_message", "key_chats_date",
+                          "key_actionBarDefaultSubtitle", "key_dialogTextGray", "key_dialogTextGray2",
+                          "key_chat_messagePanelHint", "key_chat_messagePanelIcons", "key_chats_menuItemIcon",
+                          "key_chats_menuItemText"}, Role.ON_SURFACE_VARIANT);
+                  put(new String[]{"key_divider", "key_windowBackgroundWhiteGrayLine"}, Role.OUTLINE);
+                  // Акценты
+                  put(new String[]{"key_windowBackgroundWhiteBlueText", "key_windowBackgroundWhiteBlueText2",
+                          "key_windowBackgroundWhiteBlueText4", "key_windowBackgroundWhiteBlueHeader",
+                          "key_windowBackgroundWhiteBlueIcon", "key_switchTrackChecked", "key_dialogButton",
+                          "key_dialogTextBlue", "key_dialogTextBlue2", "key_chat_messagePanelSend",
+                          "key_chat_messagePanelVoiceBackground", "key_actionBarTabActiveText", "key_actionBarTabLine",
+                          "key_featuredStickers_addButton", "key_progressCircle", "key_chats_menuTopBackground"}, Role.PRIMARY);
+                  put(new String[]{"key_chats_unreadCounterText", "key_featuredStickers_buttonText",
+                          "key_switchTrackBlueThumb"}, Role.ON_PRIMARY);
+                  // Кнопка-FAB и исходящие сообщения в стиле «контейнеров» M3
+                  put(new String[]{"key_chats_actionBackground", "key_chats_actionPressedBackground",
+                          "key_chat_outBubble", "key_chat_outBubbleSelected"}, Role.PRIMARY_CONTAINER);
+                  put(new String[]{"key_chats_actionIcon", "key_chat_messageTextOut", "key_chat_outSentCheck",
+                          "key_chat_outSentCheckSelected", "key_chat_outTimeText", "key_chat_outMenu",
+                          "key_chat_outReplyNameText"}, Role.ON_PRIMARY_CONTAINER);
+                  // Счётчики и поиск
+                  put(new String[]{"key_chats_unreadCounter", "key_chats_actionMessage"}, Role.TERTIARY);
+                  put(new String[]{"key_actionBarDefaultSearch", "key_actionBarDefaultSearchPlaceholder"}, Role.ON_SURFACE_VARIANT);
+                  put(new String[]{"key_chat_inLoader", "key_chat_inContactBackground", "key_avatar_backgroundActionBarBlue"}, Role.SECONDARY_CONTAINER);
+                  put(new String[]{"key_chat_inContactIcon", "key_chat_inFileIcon"}, Role.ON_SECONDARY_CONTAINER);
+                  return map;
+              }
+
               // Переопределение цвета ключа Telegram. null = не трогаем
               public static Integer override(int key) {
                   Context c = ApplicationLoader.applicationContext;
                   if (c == null || Build.VERSION.SDK_INT < 31 || !isMaterialYou(c)) {
                       return null;
                   }
-                  Role r;
-                  if (key == Theme.key_actionBarDefault || key == Theme.key_windowBackgroundWhite) {
-                      r = Role.SURFACE;
-                  } else if (key == Theme.key_windowBackgroundGray) {
-                      r = Role.SURFACE_VARIANT;
-                  } else if (key == Theme.key_actionBarDefaultTitle || key == Theme.key_actionBarDefaultIcon
-                          || key == Theme.key_windowBackgroundWhiteBlackText) {
-                      r = Role.ON_SURFACE;
-                  } else if (key == Theme.key_windowBackgroundWhiteBlueText || key == Theme.key_switchTrackChecked
-                          || key == Theme.key_featuredStickers_addButton) {
-                      r = Role.PRIMARY;
-                  } else {
+                  Role r = table().get(key);
+                  if (r == null) {
                       return null;
                   }
                   return role(c, r, 0);
               }
+
+              // Размеры скруглений M3: диалоги 28dp, карточки 16dp, поля 12dp
+              public static int cornerDialog() { return AndroidUtilities.dp(28); }
+              public static int cornerCard() { return AndroidUtilities.dp(16); }
+              public static int cornerField() { return AndroidUtilities.dp(12); }
           }
           JAVA
-          if [ "$MATERIAL_YOU" = "true" ]; then
-            sed -i 's/FLUX_MY_DEFAULT/true/' "$D/FluxFeatures.java"
-          else
-            sed -i 's/FLUX_MY_DEFAULT/false/' "$D/FluxFeatures.java"
-          fi
-          echo "FluxBadge.java и FluxFeatures.java созданы (Material You по умолчанию: $MATERIAL_YOU)"
 
-      - name: FluxGram - патч Theme, UserCell, ProfileActivity
+          if [ "$MATERIAL_YOU" = "true" ]; then MY=true; else MY=false; fi
+          sed -i "s/FLUX_MY_DEFAULT/$MY/" "$D/FluxFeatures.java"
+          if [ "$BADGE_PARTICLES" = "false" ]; then PT=false; else PT=true; fi
+          sed -i "s/FLUX_PARTICLES_DEFAULT/$PT/" "$D/FluxBadgeDrawable.java"
+          echo "FluxBadge, FluxBadgeDrawable, FluxFeatures созданы (Material You: $MY, частицы: $PT)"
+
+      - name: FluxGram - патч Theme, UserCell, ProfileActivity, меню, шапка чата
         run: |
           python3 - <<'PY'
-          import re
+          import re, os
 
           def read(p):
               return open(p, encoding="utf-8").read()
@@ -2659,55 +2843,101 @@ jobs:
               open(p, "w", encoding="utf-8").write(s)
 
           def add_import(s):
+              if "import org.telegram.messenger.FluxBadge;" in s:
+                  return s
               return re.sub(r'(?m)^(package [^\n]+;\n)', r'\1\nimport org.telegram.messenger.FluxBadge;\n', s, count=1)
 
-          # Material You: перехват цветов
-          p = "TMessagesProj/src/main/java/org/telegram/ui/ActionBar/Theme.java"
+          report = []
+          def ok(m): print(m); report.append("OK   " + m)
+          def warn(m): print("::warning::" + m); report.append("FAIL " + m)
+
+          SRC = "TMessagesProj/src/main/java/org/telegram/"
+
+          # 1. Material You: перехват цветов
+          p = SRC + "ui/ActionBar/Theme.java"
           s = read(p)
           sig = "private static int getColorFromTable(SparseIntArray currentColors, int key, boolean[] isDefault) {\n"
           if "FluxFeatures.override" in s:
-              print("Theme: уже пропатчен")
+              ok("Theme: уже пропатчен")
           elif s.count(sig) != 1:
-              print("::warning::Theme.java: не найден getColorFromTable, Material You не подключён")
+              warn("Theme.java: не найден getColorFromTable, Material You не подключён")
           else:
               s = s.replace(sig, sig + "        Integer fluxColor = org.telegram.messenger.FluxFeatures.override(key);\n"
                                        "        if (fluxColor != null) {\n"
                                        "            return fluxColor;\n"
                                        "        }\n", 1)
               write(p, s)
-              print("Theme: пропатчен")
+              ok("Theme: цвета Material You подключены")
 
-          # Списки: значок после имени
-          p = "TMessagesProj/src/main/java/org/telegram/ui/Cells/UserCell.java"
+          # 2. Списки пользователей
+          p = SRC + "ui/Cells/UserCell.java"
           s = read(p)
           pat = re.compile(r'(?m)^(\s*)nameTextView\.setText\(name\);\n')
           if "FluxBadge" in s:
-              print("UserCell: уже пропатчен")
+              ok("UserCell: уже пропатчен")
           elif len(pat.findall(s)) != 2:
-              print("::warning::UserCell.java: якоря не найдены, значок в списках не подключён")
+              warn("UserCell.java: якоря не найдены, значок в списках не подключён")
           else:
               s = pat.sub(lambda m: m.group(1) + "name = FluxBadge.wrapUser(getContext(), name, currentUser);\n" + m.group(0), s)
               write(p, add_import(s))
-              print("UserCell: пропатчен")
+              ok("UserCell: значок в списках")
 
-          # Профиль: значок и тап
-          p = "TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java"
+          # 3. Профиль: значок с частицами и тап
+          p = SRC + "ui/ProfileActivity.java"
           s = read(p)
           pat = re.compile(r'\} else \{\s*nameTextView\.setRightDrawable2\(null\);\s*nameTextViewRightDrawable2ContentDescription = null;\s*\}\s*if \(user != null && !MessagesController\.isSupportUser\(user\)')
           m = pat.search(s)
           if "FluxBadge" in s:
-              print("ProfileActivity: уже пропатчен")
+              ok("ProfileActivity: уже пропатчен")
           elif not m:
-              print("::warning::ProfileActivity.java: якорь не найден, значок в профиле не подключён")
+              warn("ProfileActivity.java: якорь не найден, значок в профиле не подключён")
           else:
-              new = ("} else if (FluxBadge.isFluxUser(userInfo != null ? userInfo.about : null)) {\n"
-                     "                    nameTextView.setRightDrawable2(FluxBadge.drawable(getContext()));\n"
+              new = ("} else if (FluxBadge.isFluxUser(user != null ? user.id : 0, userInfo != null ? userInfo.about : null)) {\n"
+                     "                    nameTextView.setRightDrawable2(FluxBadge.drawableAnimated(getContext()));\n"
                      "                    nameTextViewRightDrawable2ContentDescription = \"FluxGram\";\n"
                      "                    nameTextView.setOnClickListener(v -> FluxBadge.showInfo(getContext()));\n"
                      "                " + m.group(0))
               s = s[:m.start()] + new + s[m.end():]
               write(p, add_import(s))
-              print("ProfileActivity: пропатчен")
+              ok("ProfileActivity: значок с частицами в профиле")
+
+          # 4. Боковое меню (свой ник)
+          p = SRC + "ui/Cells/DrawerProfileCell.java"
+          try:
+              s = read(p)
+              pat = re.compile(r'(?m)^(\s*)nameTextView\.setText\((.*UserObject\.getUserName\(user\).*)\);\n')
+              ms = pat.findall(s)
+              if "FluxBadge" in s:
+                  ok("DrawerProfileCell: уже пропатчен")
+              elif len(ms) != 1:
+                  warn("DrawerProfileCell.java: якорь не найден (совпадений: %d), значок в боковом меню не подключён" % len(ms))
+              else:
+                  s = pat.sub(lambda m: m.group(1) + "nameTextView.setText(FluxBadge.wrapUser(getContext(), " + m.group(2) + ", user));\n", s, count=1)
+                  write(p, add_import(s))
+                  ok("DrawerProfileCell: значок в боковом меню")
+          except FileNotFoundError:
+              warn("DrawerProfileCell.java не найден")
+
+          # 5. Шапка чата
+          p = SRC + "ui/ChatActivity.java"
+          try:
+              s = read(p)
+              pat = re.compile(r'avatarContainer\.setTitle\((UserObject\.getUserName\(currentUser\))([,)])')
+              n = len(pat.findall(s))
+              if "FluxBadge" in s:
+                  ok("ChatActivity: уже пропатчен")
+              elif n == 0:
+                  warn("ChatActivity.java: якорь шапки чата не найден, значок в шапке чата не подключён")
+              else:
+                  s = pat.sub(lambda m: "avatarContainer.setTitle(FluxBadge.wrapUser(org.telegram.messenger.ApplicationLoader.applicationContext, "
+                                        + m.group(1) + ", currentUser)" + m.group(2), s)
+                  write(p, add_import(s))
+                  ok("ChatActivity: значок в шапке чата (мест: %d)" % n)
+          except FileNotFoundError:
+              warn("ChatActivity.java не найден")
+
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
+              f.write("## Патчи значка и Material You\n```\n" + "\n".join(report) + "\n```\n")
           PY
 
       - name: Нативные библиотеки (libvpx, ffmpeg, boringssl)
