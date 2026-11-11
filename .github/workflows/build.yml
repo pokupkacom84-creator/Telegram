@@ -3208,12 +3208,15 @@ jobs:
           import android.content.SharedPreferences;
           import android.content.res.Configuration;
           import android.os.Build;
+          import android.os.SystemClock;
           import android.util.SparseArray;
+          import android.util.SparseBooleanArray;
 
           import org.telegram.ui.ActionBar.Theme;
 
           import java.lang.reflect.Field;
           import java.lang.reflect.Method;
+          import java.util.concurrent.ConcurrentHashMap;
 
           public final class FluxFeatures {
 
@@ -3302,6 +3305,7 @@ jobs:
                   hueState = hue;
                   satState = sat;
                   myState = 1;
+                  TINT_CACHE.clear();
               }
 
               public static void setSeed(Context c, int hue, int sat) {
@@ -3327,6 +3331,12 @@ jobs:
 
               // Применить изменения: сбросить кэш цветов и сообщить интерфейсу о смене темы
               public static void refresh() {
+                  TINT_CACHE.clear();
+                  try {
+                      Theme.class.getMethod("refreshThemeColors").invoke(null);
+                  } catch (Throwable ignore) {
+                      // кисти обновятся по уведомлению ниже
+                  }
                   try {
                       Theme.class.getMethod("invalidateTheme").invoke(null);
                   } catch (Throwable ignore) {
@@ -3525,6 +3535,18 @@ jobs:
                   put(new String[]{"key_actionBarDefaultSearch", "key_actionBarDefaultSearchPlaceholder"}, Role.ON_SURFACE_VARIANT);
                   put(new String[]{"key_chat_inLoader", "key_chat_inContactBackground", "key_avatar_backgroundActionBarBlue"}, Role.SECONDARY_CONTAINER);
                   put(new String[]{"key_chat_inContactIcon", "key_chat_inFileIcon"}, Role.ON_SECONDARY_CONTAINER);
+                  // Пузыри, ответы, ссылки, галочки, вкладки, режим выделения
+                  put(new String[]{"key_chat_outBubbleGradient1", "key_chat_outBubbleGradient2", "key_chat_outBubbleGradient3"}, Role.PRIMARY_CONTAINER);
+                  put(new String[]{"key_chat_outReplyLine", "key_chat_outPreviewInstantText", "key_chat_outViaBotNameText",
+                          "key_chat_messageLinkOut", "key_chat_outSentClock", "key_chat_outSentClockSelected"}, Role.ON_PRIMARY_CONTAINER);
+                  put(new String[]{"key_chat_inReplyLine", "key_chat_inReplyNameText", "key_chat_inPreviewInstantText",
+                          "key_chat_inViaBotNameText", "key_chat_messageLinkIn", "key_chats_verifiedBackground",
+                          "key_chats_sentCheck", "key_chats_sentReadCheck", "key_chats_tabUnreadActiveBackground",
+                          "key_chat_inLoaderSelected", "key_chat_topPanelLine", "key_chat_topPanelTitle"}, Role.PRIMARY);
+                  put(new String[]{"key_chat_inTimeText", "key_chat_inTimeTextSelected", "key_chats_tabUnreadUnactiveBackground"}, Role.ON_SURFACE_VARIANT);
+                  put(new String[]{"key_actionBarActionModeDefault", "key_actionBarActionModeDefaultTop",
+                          "key_chat_topPanelBackground", "key_chat_replyPanelBackground"}, Role.SURFACE_CONTAINER_HIGH);
+                  put(new String[]{"key_actionBarActionModeDefaultIcon", "key_actionBarActionModeDefaultTitle"}, Role.ON_SURFACE);
                   return map;
               }
 
@@ -3556,6 +3578,190 @@ jobs:
                       return null;
                   }
                   return preview(c, r, dark);
+              }
+
+              // ===== Полное покрытие: все остальные ключи Telegram (их сотни) перекрашиваются автоматически =====
+              // Берём исходный цвет текущей темы Telegram и по правилам переносим его в палитру Material You:
+              //  - нейтральные серые (поверхности, текст, разделители) получают лёгкий оттенок палитры;
+              //  - синие акценты (ссылки, галочки, кнопки, выделение) получают оттенок палитры;
+              //  - красные, зелёные, жёлтые и т.д. (смысловые цвета) не трогаются;
+              //  - яркость и прозрачность сохраняются, поэтому контраст темы не ломается.
+              private static final ConcurrentHashMap<Long, Integer> TINT_CACHE = new ConcurrentHashMap<>();
+              private static volatile SparseBooleanArray skipKeys;
+              private static volatile float seedH = 205f;
+              private static volatile float seedS = 0.5f;
+              private static volatile float seedN = 0.06f;
+              private static volatile long seedStamp;
+              private static volatile int seedSys;
+
+              // Ключи, которые должны остаться как есть (аватарки, обои, плеер, звонки, графики, тени, сервисные плашки поверх обоев)
+              private static SparseBooleanArray skip() {
+                  SparseBooleanArray s = skipKeys;
+                  if (s != null) {
+                      return s;
+                  }
+                  synchronized (FluxFeatures.class) {
+                      if (skipKeys != null) {
+                          return skipKeys;
+                      }
+                      s = new SparseBooleanArray();
+                      String[] pat = {"key_avatar_", "wallpaper", "key_player_", "voipgroup", "key_calls_", "key_color_",
+                              "premium", "key_stories_", "statisticchart", "shadow", "servicebackground", "servicetext",
+                              "serviceicon", "servicelink", "key_chat_recording", "key_code", "key_chat_inbubbleoverlay",
+                              "key_chat_outbubbleoverlay"};
+                      for (Field f : Theme.class.getFields()) {
+                          String n = f.getName();
+                          if (!n.startsWith("key_") || f.getType() != int.class) {
+                              continue;
+                          }
+                          String low = n.toLowerCase();
+                          for (String p : pat) {
+                              if (low.contains(p)) {
+                                  try {
+                                      s.put(f.getInt(null), true);
+                                  } catch (Throwable ignore) {
+                                      // поле недоступно: пропускаем
+                                  }
+                                  break;
+                              }
+                          }
+                      }
+                      skipKeys = s;
+                      return s;
+                  }
+              }
+
+              // Оттенок, насыщенность и «серая» насыщенность палитры. Для системных цветов берём обои (Android 12+)
+              private static void updateSeed(Context c) {
+                  int hue = seedHue(c);
+                  if (hue >= 0) {
+                      seedH = hue;
+                      seedS = seedSat(c) / 100f;
+                      seedN = Math.min(0.12f, seedS * 0.22f);
+                      return;
+                  }
+                  long now = SystemClock.elapsedRealtime();
+                  if (seedStamp != 0 && now - seedStamp < 2000) {
+                      return;
+                  }
+                  seedStamp = now;
+                  if (Build.VERSION.SDK_INT < 31) {
+                      return;
+                  }
+                  try {
+                      int p = c.getResources().getColor(android.R.color.system_accent1_500, c.getTheme());
+                      int n = c.getResources().getColor(android.R.color.system_neutral1_500, c.getTheme());
+                      if (p != seedSys) {
+                          seedSys = p;
+                          TINT_CACHE.clear();
+                      }
+                      float[] hsl = new float[3];
+                      rgbToHsl(p, hsl);
+                      seedH = hsl[0];
+                      seedS = hsl[1];
+                      rgbToHsl(n, hsl);
+                      seedN = Math.max(0.03f, Math.min(0.12f, hsl[1]));
+                  } catch (Throwable ignore) {
+                      // оставляем прежнюю палитру
+                  }
+              }
+
+              private static void rgbToHsl(int color, float[] out) {
+                  float r = ((color >> 16) & 255) / 255f;
+                  float g = ((color >> 8) & 255) / 255f;
+                  float b = (color & 255) / 255f;
+                  float max = Math.max(r, Math.max(g, b));
+                  float min = Math.min(r, Math.min(g, b));
+                  float l = (max + min) / 2f;
+                  float d = max - min;
+                  float h;
+                  float s;
+                  if (d == 0f) {
+                      h = 0f;
+                      s = 0f;
+                  } else {
+                      s = l > 0.5f ? d / (2f - max - min) : d / (max + min);
+                      if (max == r) {
+                          h = (g - b) / d + (g < b ? 6f : 0f);
+                      } else if (max == g) {
+                          h = (b - r) / d + 2f;
+                      } else {
+                          h = (r - g) / d + 4f;
+                      }
+                      h *= 60f;
+                  }
+                  out[0] = h;
+                  out[1] = s;
+                  out[2] = l;
+              }
+
+              private static int hslA(float h, float s, float l, int alpha) {
+                  return (alpha << 24) | (hsl(h, s, l) & 0xFFFFFF);
+              }
+
+              private static int computeTint(int orig, int alpha, boolean dark, boolean my, boolean am) {
+                  float[] hsl = new float[3];
+                  rgbToHsl(orig, hsl);
+                  float h = hsl[0];
+                  float s = hsl[1];
+                  float l = hsl[2];
+                  if (s < 0.10f) {
+                      // серый: поверхности, текст, разделители
+                      if (l >= 0.985f || l <= 0.015f) {
+                          return orig;
+                      }
+                      float nl = l;
+                      if (am && dark && l < 0.25f) {
+                          nl = l * 0.4f;
+                      }
+                      if (my) {
+                          return hslA(seedH, seedN, nl, alpha);
+                      }
+                      return nl != l ? hslA(h, s, nl, alpha) : orig;
+                  }
+                  if (my && h >= 185f && h <= 262f) {
+                      // синий акцент или синеватая поверхность тёмной темы Telegram
+                      float ns = Math.min(0.92f, s * (seedS / 0.55f));
+                      float nl = l;
+                      if (am && dark && l < 0.25f) {
+                          nl = l * 0.4f;
+                      }
+                      return hslA(seedH, ns, nl, alpha);
+                  }
+                  return orig;
+              }
+
+              // Вызывается из Theme для ключей, которых нет в таблице ролей. orig = исходный цвет темы Telegram
+              public static int tint(int key, int orig) {
+                  Context c = ApplicationLoader.applicationContext;
+                  if (c == null) {
+                      return orig;
+                  }
+                  boolean my = isMaterialYou(c) && !(seedHue(c) < 0 && Build.VERSION.SDK_INT < 31);
+                  boolean am = amoled(c);
+                  if (!my && !am) {
+                      return orig;
+                  }
+                  if (table().get(key) != null || skip().get(key)) {
+                      return orig;
+                  }
+                  int alpha = orig >>> 24;
+                  if (alpha == 0) {
+                      return orig;
+                  }
+                  boolean dark = isDark(c);
+                  updateSeed(c);
+                  long ck = ((long) key << 34) | (dark ? 1L << 33 : 0L) | (my ? 1L << 32 : 0L) | (orig & 0xFFFFFFFFL);
+                  Integer cached = TINT_CACHE.get(ck);
+                  if (cached != null) {
+                      return cached;
+                  }
+                  int res = computeTint(orig, alpha, dark, my, am);
+                  if (TINT_CACHE.size() > 6000) {
+                      TINT_CACHE.clear();
+                  }
+                  TINT_CACHE.put(ck, res);
+                  return res;
               }
 
               // Размеры скруглений M3: диалоги 28dp, карточки 16dp, поля 12dp
@@ -4141,16 +4347,29 @@ jobs:
                   "        if (fluxColor != null) {\n"
                   "            return fluxColor;\n"
                   "        }\n")
+          # Явные роли M3 идут через override(), все остальные ключи (сотни) через tint():
+          # исходный цвет темы Telegram перекрашивается в палитру Material You
+          wrap1 = (sig +
+                   "        if (currentColors != Theme.currentColors) {\n"
+                   "            return getColorFromTableFluxOrig(currentColors, key, isDefault);\n"
+                   "        }\n" + hook +
+                   "        return org.telegram.messenger.FluxFeatures.tint(key, getColorFromTableFluxOrig(currentColors, key, isDefault));\n"
+                   "    }\n\n"
+                   "    private static int getColorFromTableFluxOrig(SparseIntArray currentColors, int key, boolean[] isDefault) {\n")
+          wrap2 = (sig2 + hook +
+                   "        return org.telegram.messenger.FluxFeatures.tint(key, getColorFluxOrig(key, isDefault, ignoreAnimation));\n"
+                   "    }\n\n"
+                   "    private static int getColorFluxOrig(int key, boolean[] isDefault, boolean ignoreAnimation) {\n")
           if "FluxFeatures.override" in s:
               ok("Theme: уже пропатчен")
           elif s.count(sig) == 1:
-              s = s.replace(sig, sig + hook, 1)
+              s = s.replace(sig, wrap1, 1)
               write(p, s)
-              ok("Theme: цвета Material You подключены (getColorFromTable)")
+              ok("Theme: Material You на все ключи темы (getColorFromTable: роли + автоперекраска)")
           elif s.count(sig2) == 1:
-              s = s.replace(sig2, sig2 + hook, 1)
+              s = s.replace(sig2, wrap2, 1)
               write(p, s)
-              ok("Theme: цвета Material You подключены (getColor, запасной якорь)")
+              ok("Theme: Material You на все ключи темы (getColor, запасной якорь: роли + автоперекраска)")
           else:
               warn("Theme.java: не найден ни getColorFromTable, ни getColor, цвета Material You не подключены")
 
