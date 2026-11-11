@@ -1918,6 +1918,715 @@ jobs:
           print("✅ Premium скрыт по флагу hide_premium")
           PY
 
+      - name: FluxGram - звёзды, интерфейс Telegram, Premium (визуал), сохранение чата
+        run: |
+          python3 - <<'PY'
+          import re, os
+
+          base = "TMessagesProj/src/main/java/org/telegram"
+          ui = base + "/ui"
+          msg = base + "/messenger"
+          report = []
+
+          def ok(m):
+              print(m)
+              report.append("OK   " + m)
+
+          def warn(m):
+              print("::warning::" + m)
+              report.append("FAIL " + m)
+
+          def read(p):
+              try:
+                  return open(p, encoding="utf-8").read()
+              except FileNotFoundError:
+                  return ""
+
+          def write(p, s):
+              open(p, "w", encoding="utf-8").write(s)
+
+          # --- какие события NotificationCenter есть в этой версии форка
+          nc = read(msg + "/NotificationCenter.java")
+          events = [n for n in ("mainUserInfoChanged", "starBalanceUpdated", "currentUserPremiumStatusChanged")
+                    if re.search(r'\b' + n + r'\s*=', nc)]
+          n_acc = "".join("                NotificationCenter.getInstance(a).postNotificationName(NotificationCenter.%s);\n" % n for n in events)
+          n_glob = "".join("            NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.%s);\n" % n for n in events)
+
+          # ============================================================ FluxVisual (логика: звёзды, premium, сохранение чата)
+          visual = r"""package org.telegram.messenger;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+
+          import org.telegram.tgnet.TLRPC;
+
+          /** Локальные визуальные настройки FluxGram. Сервер и реальный аккаунт не затрагиваются. */
+          public final class FluxVisual {
+
+              private static final String PREFS = "fluxgram";
+              private static final boolean DEF_PREMIUM = true;
+              private static final boolean DEF_KEEP_CHAT = true;
+              private static final boolean DEF_STARS = false;
+              private static final long DEF_STARS_AMOUNT = 1000L;
+              public static final long MAX_STARS = 1000000000L;
+
+              private static volatile int premiumState = -1;
+              private static volatile int starsState = -1;
+              private static volatile int keepState = -1;
+              private static volatile long starsValue = -1L;
+
+              private static SharedPreferences prefs() {
+                  Context c = ApplicationLoader.applicationContext;
+                  return c == null ? null : c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+              }
+
+              private static void putBool(String key, boolean v) {
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putBoolean(key, v).apply();
+                  }
+              }
+
+              // ---------------------------------------------------------------- Premium (визуал)
+              public static boolean premiumOn() {
+                  int s = premiumState;
+                  if (s < 0) {
+                      SharedPreferences p = prefs();
+                      if (p == null) {
+                          return DEF_PREMIUM;
+                      }
+                      s = p.getBoolean("visual_premium", DEF_PREMIUM) ? 1 : 0;
+                      premiumState = s;
+                  }
+                  return s == 1;
+              }
+
+              public static void setPremium(boolean on) {
+                  putBool("visual_premium", on);
+                  premiumState = on ? 1 : 0;
+                  applySelf();
+                  refreshUi();
+              }
+
+              /** Вызывается из MessagesController.putUser: свой профиль всегда с флагом premium, пока режим включён. */
+              public static void onPutUser(TLRPC.User u, long selfId) {
+                  if (u == null || u.id != selfId || !premiumOn()) {
+                      return;
+                  }
+                  SharedPreferences p = prefs();
+                  String rk = "real_premium_" + u.id;
+                  if (p != null && !p.contains(rk)) {
+                      p.edit().putBoolean(rk, u.premium).apply();
+                  }
+                  u.premium = true;
+              }
+
+              public static void applySelf() {
+                  try {
+                      SharedPreferences p = prefs();
+                      for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+                          UserConfig uc = UserConfig.getInstance(a);
+                          if (uc == null || !uc.isClientActivated()) {
+                              continue;
+                          }
+                          TLRPC.User u = uc.getCurrentUser();
+                          if (u == null) {
+                              continue;
+                          }
+                          String rk = "real_premium_" + u.id;
+                          if (premiumOn()) {
+                              if (p != null && !p.contains(rk)) {
+                                  p.edit().putBoolean(rk, u.premium).apply();
+                              }
+                              u.premium = true;
+                          } else if (p != null && p.contains(rk)) {
+                              u.premium = p.getBoolean(rk, false);
+                              p.edit().remove(rk).apply();
+                          }
+                      }
+                  } catch (Throwable t) {
+                      FileLog.e(t);
+                  }
+              }
+
+              public static void startup() {
+                  new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
+                      @Override
+                      public void run() {
+                          applySelf();
+                          refreshUi();
+                      }
+                  }, 4000);
+              }
+
+              // ---------------------------------------------------------------- Звёзды (визуал)
+              public static boolean starsOn() {
+                  int s = starsState;
+                  if (s < 0) {
+                      SharedPreferences p = prefs();
+                      if (p == null) {
+                          return DEF_STARS;
+                      }
+                      s = p.getBoolean("visual_stars", DEF_STARS) ? 1 : 0;
+                      starsState = s;
+                  }
+                  return s == 1;
+              }
+
+              public static void setStars(boolean on) {
+                  putBool("visual_stars", on);
+                  starsState = on ? 1 : 0;
+                  refreshUi();
+              }
+
+              public static long starsAmount() {
+                  long v = starsValue;
+                  if (v < 0) {
+                      SharedPreferences p = prefs();
+                      if (p == null) {
+                          return DEF_STARS_AMOUNT;
+                      }
+                      v = p.getLong("visual_stars_amount", DEF_STARS_AMOUNT);
+                      starsValue = v;
+                  }
+                  return v;
+              }
+
+              public static void setStarsAmount(long v) {
+                  if (v < 0) {
+                      v = 0;
+                  }
+                  if (v > MAX_STARS) {
+                      v = MAX_STARS;
+                  }
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putLong("visual_stars_amount", v).apply();
+                  }
+                  starsValue = v;
+                  refreshUi();
+              }
+
+              // ---------------------------------------------------------------- Сохранение чата
+              public static boolean keepChat() {
+                  int s = keepState;
+                  if (s < 0) {
+                      SharedPreferences p = prefs();
+                      if (p == null) {
+                          return DEF_KEEP_CHAT;
+                      }
+                      s = p.getBoolean("keep_chat", DEF_KEEP_CHAT) ? 1 : 0;
+                      keepState = s;
+                  }
+                  return s == 1;
+              }
+
+              public static void setKeepChat(boolean on) {
+                  putBool("keep_chat", on);
+                  keepState = on ? 1 : 0;
+              }
+
+              // ---------------------------------------------------------------- Интерфейс
+              public static boolean hidePremium() {
+                  SharedPreferences p = prefs();
+                  return p == null || p.getBoolean("hide_premium", true);
+              }
+
+              public static void setHidePremium(boolean on) {
+                  putBool("hide_premium", on);
+              }
+
+              public static void refreshUi() {
+                  AndroidUtilities.runOnUIThread(new Runnable() {
+                      @Override
+                      public void run() {
+                          try {
+                              for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+                                  if (!UserConfig.getInstance(a).isClientActivated()) {
+                                      continue;
+                                  }
+          @NOTIFY_ACC@                    }
+          @NOTIFY_GLOBAL@                } catch (Throwable t) {
+                              FileLog.e(t);
+                          }
+                      }
+                  });
+              }
+          }
+          """
+          visual = visual.replace("@NOTIFY_ACC@", n_acc.replace("                NotificationCenter", "                        NotificationCenter"))
+          visual = visual.replace("@NOTIFY_GLOBAL@", n_glob.replace("            NotificationCenter", "                    NotificationCenter"))
+          write(msg + "/FluxVisual.java", visual)
+          ok("FluxVisual создан (события: %s)" % ", ".join(events))
+
+          # ============================================================ экран «Звёзды»
+          stars = r"""package org.telegram.ui;
+
+          import android.content.Context;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.text.InputType;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.EditText;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import org.telegram.messenger.AndroidUtilities;
+          import org.telegram.messenger.FluxVisual;
+          import org.telegram.messenger.R;
+          import org.telegram.ui.ActionBar.ActionBar;
+          import org.telegram.ui.ActionBar.BaseFragment;
+          import org.telegram.ui.ActionBar.Theme;
+          import org.telegram.ui.Cells.HeaderCell;
+          import org.telegram.ui.Cells.TextCheckCell;
+          import org.telegram.ui.Cells.TextSettingsCell;
+
+          public class FluxStarsActivity extends BaseFragment {
+
+              private TextView balanceView;
+              private EditText input;
+              private TextCheckCell toggle;
+
+              @Override
+              public View createView(final Context context) {
+                  actionBar.setBackButtonImage(R.drawable.ic_ab_back);
+                  actionBar.setAllowOverlayTitle(true);
+                  actionBar.setTitle("Звёзды");
+                  actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
+                      @Override
+                      public void onItemClick(int id) {
+                          if (id == -1) {
+                              finishFragment();
+                          }
+                      }
+                  });
+
+                  FrameLayout root = new FrameLayout(context);
+                  root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
+                  fragmentView = root;
+
+                  ScrollView scroll = new ScrollView(context);
+                  root.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                  LinearLayout list = new LinearLayout(context);
+                  list.setOrientation(LinearLayout.VERTICAL);
+                  scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  HeaderCell h1 = new HeaderCell(context);
+                  h1.setText("Баланс звёзд");
+                  list.addView(h1, matchWrap());
+
+                  LinearLayout c1 = card(context, list);
+                  balanceView = new TextView(context);
+                  balanceView.setTextSize(34);
+                  balanceView.setTypeface(Typeface.DEFAULT_BOLD);
+                  balanceView.setGravity(Gravity.CENTER);
+                  balanceView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                  balanceView.setPadding(0, AndroidUtilities.dp(22), 0, AndroidUtilities.dp(22));
+                  c1.addView(balanceView, matchWrap());
+
+                  toggle = new TextCheckCell(context);
+                  toggle.setTextAndCheck("Показывать этот баланс", FluxVisual.starsOn(), false);
+                  toggle.setOnClickListener(view -> {
+                      FluxVisual.setStars(!FluxVisual.starsOn());
+                      refresh();
+                  });
+                  c1.addView(toggle, matchWrap());
+                  note(list, context, "Только визуал на этом устройстве: баланс виден в разделе звёзд FluxGram. Настоящий баланс аккаунта не меняется, потратить такие звёзды нельзя.");
+
+                  HeaderCell h2 = new HeaderCell(context);
+                  h2.setText("Выдать звёзды");
+                  list.addView(h2, matchWrap());
+
+                  LinearLayout c2 = card(context, list);
+                  input = new EditText(context);
+                  input.setInputType(InputType.TYPE_CLASS_NUMBER);
+                  input.setSingleLine(true);
+                  input.setHint("Количество");
+                  input.setText(String.valueOf(FluxVisual.starsAmount()));
+                  input.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                  input.setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+                  input.setBackground(null);
+                  input.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(14), AndroidUtilities.dp(21), AndroidUtilities.dp(14));
+                  c2.addView(input, matchWrap());
+
+                  action(c2, context, "Выдать указанное количество", true, view -> {
+                      String t = input.getText().toString().replaceAll("[^0-9]", "");
+                      long v = 0;
+                      if (t.length() > 0) {
+                          try {
+                              v = Long.parseLong(t.length() > 10 ? String.valueOf(FluxVisual.MAX_STARS) : t);
+                          } catch (NumberFormatException e) {
+                              v = 0;
+                          }
+                      }
+                      v = Math.min(v, FluxVisual.MAX_STARS);
+                      FluxVisual.setStarsAmount(v);
+                      FluxVisual.setStars(true);
+                      input.setText(String.valueOf(v));
+                      try {
+                          AndroidUtilities.hideKeyboard(input);
+                      } catch (Throwable ignore) {
+                      }
+                      refresh();
+                      Toast.makeText(context, "Выдано: " + format(v), Toast.LENGTH_SHORT).show();
+                  });
+                  action(c2, context, "+100", true, view -> add(100L));
+                  action(c2, context, "+1 000", true, view -> add(1000L));
+                  action(c2, context, "+10 000", true, view -> add(10000L));
+                  action(c2, context, "+100 000", true, view -> add(100000L));
+                  action(c2, context, "Обнулить", false, view -> {
+                      FluxVisual.setStarsAmount(0);
+                      input.setText("0");
+                      refresh();
+                  });
+
+                  refresh();
+                  return fragmentView;
+              }
+
+              private void add(long delta) {
+                  long v = Math.min(FluxVisual.MAX_STARS, FluxVisual.starsAmount() + delta);
+                  FluxVisual.setStarsAmount(v);
+                  FluxVisual.setStars(true);
+                  input.setText(String.valueOf(v));
+                  refresh();
+              }
+
+              private void refresh() {
+                  boolean on = FluxVisual.starsOn();
+                  toggle.setChecked(on);
+                  balanceView.setText("\u2B50 " + format(FluxVisual.starsAmount()));
+                  balanceView.setAlpha(on ? 1f : 0.4f);
+              }
+
+              private static String format(long v) {
+                  return String.format(java.util.Locale.US, "%,d", v).replace(',', ' ');
+              }
+
+              private void action(LinearLayout card, Context context, String title, boolean divider, View.OnClickListener l) {
+                  TextSettingsCell cell = new TextSettingsCell(context);
+                  cell.setText(title, divider);
+                  cell.setOnClickListener(l);
+                  card.addView(cell, matchWrap());
+              }
+
+              private LinearLayout.LayoutParams matchWrap() {
+                  return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+              }
+
+              private LinearLayout card(Context context, LinearLayout list) {
+                  LinearLayout c = new LinearLayout(context);
+                  c.setOrientation(LinearLayout.VERTICAL);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  bg.setCornerRadius(AndroidUtilities.dp(18));
+                  c.setBackground(bg);
+                  c.setClipToOutline(true);
+                  LinearLayout.LayoutParams lp = matchWrap();
+                  lp.setMargins(AndroidUtilities.dp(12), AndroidUtilities.dp(6), AndroidUtilities.dp(12), AndroidUtilities.dp(6));
+                  list.addView(c, lp);
+                  return c;
+              }
+
+              private void note(LinearLayout list, Context context, String text) {
+                  TextView t = new TextView(context);
+                  t.setText(text);
+                  t.setTextSize(14);
+                  t.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+                  t.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(10), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
+                  list.addView(t, matchWrap());
+              }
+          }
+          """
+          write(ui + "/FluxStarsActivity.java", stars)
+          ok("FluxStarsActivity создан")
+
+          # ============================================================ экран «Интерфейс Telegram»
+          def ctor_ok(cls, need=None, arg=False):
+              s = read(ui + "/" + cls + ".java")
+              if not s:
+                  return False
+              if need and need not in s:
+                  return False
+              cs = re.findall(r'public\s+' + cls + r'\s*\(([^)]*)\)', s)
+              if not cs:
+                  return not arg
+              if arg:
+                  return any(c.strip().startswith("int ") or c.strip().startswith("int\n") for c in cs)
+              return any(c.strip() == "" for c in cs)
+
+          cands = [
+              ("Оформление и темы", "ThemeActivity", "new ThemeActivity(ThemeActivity.THEME_TYPE_BASIC)", ctor_ok("ThemeActivity", "THEME_TYPE_BASIC", True)),
+              ("Папки с чатами", "FiltersSetupActivity", "new FiltersSetupActivity()", ctor_ok("FiltersSetupActivity")),
+              ("Энергосбережение", "LiteModeSettingsActivity", "new LiteModeSettingsActivity()", ctor_ok("LiteModeSettingsActivity")),
+              ("Уведомления и звуки", "NotificationsSettingsActivity", "new NotificationsSettingsActivity()", ctor_ok("NotificationsSettingsActivity")),
+              ("Данные и память", "DataSettingsActivity", "new DataSettingsActivity()", ctor_ok("DataSettingsActivity")),
+              ("Язык", "LanguageSelectActivity", "new LanguageSelectActivity()", ctor_ok("LanguageSelectActivity")),
+          ]
+          links = [c for c in cands if c[3]]
+          for c in cands:
+              if not c[3]:
+                  warn("Интерфейс: экран %s не найден или другой конструктор, пункт «%s» пропущен" % (c[1], c[0]))
+
+          link_code = ""
+          for i, (title, cls, expr, _) in enumerate(links):
+              div = "true" if i < len(links) - 1 else "false"
+              link_code += ('        TextSettingsCell t%d = new TextSettingsCell(context);\n'
+                            '        t%d.setText("%s", %s);\n'
+                            '        t%d.setOnClickListener(view -> presentFragment(%s));\n'
+                            '        c1.addView(t%d, matchWrap());\n') % (i, i, title, div, i, expr, i)
+
+          iface = r"""package org.telegram.ui;
+
+          import android.content.Context;
+          import android.graphics.drawable.GradientDrawable;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+
+          import org.telegram.messenger.AndroidUtilities;
+          import org.telegram.messenger.FluxVisual;
+          import org.telegram.messenger.R;
+          import org.telegram.ui.ActionBar.ActionBar;
+          import org.telegram.ui.ActionBar.BaseFragment;
+          import org.telegram.ui.ActionBar.Theme;
+          import org.telegram.ui.Cells.HeaderCell;
+          import org.telegram.ui.Cells.TextCheckCell;
+          import org.telegram.ui.Cells.TextSettingsCell;
+
+          public class FluxInterfaceActivity extends BaseFragment {
+
+              @Override
+              public View createView(final Context context) {
+                  actionBar.setBackButtonImage(R.drawable.ic_ab_back);
+                  actionBar.setAllowOverlayTitle(true);
+                  actionBar.setTitle("Интерфейс");
+                  actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
+                      @Override
+                      public void onItemClick(int id) {
+                          if (id == -1) {
+                              finishFragment();
+                          }
+                      }
+                  });
+
+                  FrameLayout root = new FrameLayout(context);
+                  root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
+                  fragmentView = root;
+
+                  ScrollView scroll = new ScrollView(context);
+                  root.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                  LinearLayout list = new LinearLayout(context);
+                  list.setOrientation(LinearLayout.VERTICAL);
+                  scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  HeaderCell h1 = new HeaderCell(context);
+                  h1.setText("Настройки Telegram");
+                  list.addView(h1, matchWrap());
+                  LinearLayout c1 = card(context, list);
+          @LINKS@
+                  HeaderCell h2 = new HeaderCell(context);
+                  h2.setText("Интерфейс FluxGram");
+                  list.addView(h2, matchWrap());
+                  LinearLayout c2 = card(context, list);
+                  final TextCheckCell hide = new TextCheckCell(context);
+                  hide.setTextAndCheck("Скрыть Premium в настройках", FluxVisual.hidePremium(), false);
+                  hide.setOnClickListener(view -> {
+                      boolean on = !FluxVisual.hidePremium();
+                      FluxVisual.setHidePremium(on);
+                      hide.setChecked(on);
+                  });
+                  c2.addView(hide, matchWrap());
+                  note(list, context, "Применяется при следующем открытии настроек. Если включён «Premium бесплатно (визуал)», пункт Premium остаётся видимым.");
+                  return fragmentView;
+              }
+
+              private LinearLayout.LayoutParams matchWrap() {
+                  return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+              }
+
+              private LinearLayout card(Context context, LinearLayout list) {
+                  LinearLayout c = new LinearLayout(context);
+                  c.setOrientation(LinearLayout.VERTICAL);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  bg.setCornerRadius(AndroidUtilities.dp(18));
+                  c.setBackground(bg);
+                  c.setClipToOutline(true);
+                  LinearLayout.LayoutParams lp = matchWrap();
+                  lp.setMargins(AndroidUtilities.dp(12), AndroidUtilities.dp(6), AndroidUtilities.dp(12), AndroidUtilities.dp(6));
+                  list.addView(c, lp);
+                  return c;
+              }
+
+              private void note(LinearLayout list, Context context, String text) {
+                  TextView t = new TextView(context);
+                  t.setText(text);
+                  t.setTextSize(14);
+                  t.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+                  t.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(10), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
+                  list.addView(t, matchWrap());
+              }
+          }
+          """
+          if links:
+              iface = iface.replace("@LINKS@", link_code)
+          else:
+              iface = iface.replace("@LINKS@", "")
+          write(ui + "/FluxInterfaceActivity.java", iface)
+          ok("FluxInterfaceActivity создан (ссылок на экраны Telegram: %d)" % len(links))
+
+          # ============================================================ строки в хабе «Настройки FluxGram»
+          hub_p = ui + "/FluxHubActivity.java"
+          hub = read(hub_p)
+          if not hub:
+              warn("FluxHubActivity.java не найден, новые пункты в «Настройки FluxGram» не добавлены")
+          elif "FluxStarsActivity" in hub:
+              ok("FluxHub: уже пропатчен")
+          else:
+              hub = hub.replace('spy.setText("Шпион", false);', 'spy.setText("Шпион", true);', 1)
+              m = re.search(r'\n([ \t]*)c\.addView\(spy,[^\n]*\);', hub)
+              if not m:
+                  warn("FluxHub: не нашёл c.addView(spy, ...), пункты не добавлены")
+              else:
+                  i = m.group(1)
+                  LP = "new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)"
+                  def link(var, title, cls):
+                      return ("\n" + i + "TextSettingsCell " + var + " = new TextSettingsCell(context);"
+                              "\n" + i + var + ".setText(\"" + title + "\", true);"
+                              "\n" + i + var + ".setOnClickListener(view -> presentFragment(new " + cls + "()));"
+                              "\n" + i + "c.addView(" + var + ", " + LP + ");")
+                  def check(var, title, getter, setter, last):
+                      return ("\n" + i + "final TextCheckCell " + var + " = new TextCheckCell(context);"
+                              "\n" + i + var + ".setTextAndCheck(\"" + title + "\", FluxVisual." + getter + "(), " + ("false" if last else "true") + ");"
+                              "\n" + i + var + ".setOnClickListener(view -> {"
+                              "\n" + i + "    boolean on = !FluxVisual." + getter + "();"
+                              "\n" + i + "    FluxVisual." + setter + "(on);"
+                              "\n" + i + "    " + var + ".setChecked(on);"
+                              "\n" + i + "});"
+                              "\n" + i + "c.addView(" + var + ", " + LP + ");")
+                  add = (link("fluxStars", "Звёзды", "FluxStarsActivity") +
+                         link("fluxIface", "Интерфейс Telegram", "FluxInterfaceActivity") +
+                         check("fluxPremium", "Premium бесплатно (визуал)", "premiumOn", "setPremium", False) +
+                         check("fluxKeep", "Сохранять чат после удаления", "keepChat", "setKeepChat", True))
+                  hub = hub[:m.end()] + add + hub[m.end():]
+                  for imp in ("import org.telegram.messenger.FluxVisual;", "import org.telegram.ui.Cells.TextCheckCell;"):
+                      if imp not in hub:
+                          hub = re.sub(r'(?m)^(package [^\n]+;\n)', lambda mm: mm.group(1) + "\n" + imp + "\n", hub, count=1)
+                  write(hub_p, hub)
+                  ok("FluxHub: пункты Звёзды, Интерфейс Telegram, Premium (визуал), Сохранять чат")
+
+          # ============================================================ UserConfig.isPremium: premium только визуально
+          p = msg + "/UserConfig.java"
+          s = read(p)
+          pat = re.compile(r'(public\s+boolean\s+isPremium\s*\(\s*\)\s*\{\n)')
+          if "FluxVisual" in s:
+              ok("UserConfig: уже пропатчен")
+          elif len(pat.findall(s)) >= 1:
+              s = pat.sub(lambda m: m.group(1) + "        if (FluxVisual.premiumOn() && getCurrentUser() != null) {\n            return true;\n        }\n", s, count=1)
+              write(p, s)
+              ok("UserConfig.isPremium: визуальный Premium")
+          else:
+              warn("UserConfig.java: isPremium() не найден, визуальный Premium не подключён")
+
+          # ============================================================ MessagesController.putUser: свой профиль с флагом premium
+          p = msg + "/MessagesController.java"
+          s = read(p)
+          pat = re.compile(r'(public\s+boolean\s+putUser\s*\(\s*(?:final\s+)?TLRPC\.User\s+(\w+)\s*,\s*boolean\s+\w+[^)]*\)\s*\{\n)')
+          if "FluxVisual.onPutUser" in s:
+              ok("MessagesController.putUser: уже пропатчен")
+          else:
+              s, n = pat.subn(lambda m: m.group(1) + "        FluxVisual.onPutUser(" + m.group(2) + ", getUserConfig().getClientUserId());\n", s)
+              if n:
+                  write(p, s)
+                  ok("MessagesController.putUser: флаг premium для своего профиля (мест: %d)" % n)
+              else:
+                  warn("MessagesController.putUser не найден, значок Premium у своего профиля может мигать")
+
+          # ============================================================ Пункт Premium в настройках остаётся видимым при визуальном Premium
+          p = ui + "/SettingsActivity.java"
+          s = read(p)
+          old = '.getBoolean("hide_premium", true);'
+          if "FluxVisual.premiumOn()" in s:
+              ok("SettingsActivity: hide_premium уже учитывает визуальный Premium")
+          elif old in s:
+              s = s.replace(old, '.getBoolean("hide_premium", true) && !org.telegram.messenger.FluxVisual.premiumOn();', 1)
+              write(p, s)
+              ok("SettingsActivity: Premium-пункт виден при визуальном Premium")
+          else:
+              warn("SettingsActivity: не нашёл fluxHidePremium, пункт Premium останется скрытым")
+
+          # ============================================================ StarsController: визуальный баланс
+          import glob
+          cands_s = glob.glob(base + "/**/StarsController.java", recursive=True)
+          if not cands_s:
+              warn("StarsController.java не найден, визуальный баланс звёзд не подключён")
+          else:
+              p = cands_s[0]
+              s = read(p)
+              pat = re.compile(r'(public\s+long\s+getBalance\s*\([^)]*\)\s*\{\n)')
+              if "FluxVisual" in s:
+                  ok("StarsController: уже пропатчен")
+              else:
+                  s, n = pat.subn(lambda m: m.group(1) + "        if (org.telegram.messenger.FluxVisual.starsOn()) {\n            return org.telegram.messenger.FluxVisual.starsAmount();\n        }\n", s)
+                  if n:
+                      write(p, s)
+                      ok("StarsController.getBalance: визуальный баланс (методов: %d)" % n)
+                  else:
+                      warn("StarsController: getBalance() с типом long не найден, звёзды в интерфейсе не изменятся")
+
+          # ============================================================ Сохранение чата: секретный чат, закрытый собеседником
+          p = msg + "/SecretChatHelper.java"
+          s = read(p)
+          pat = re.compile(r'(TL_encryptedChatDiscarded\s*&&\s*\w+\.history_deleted)')
+          if "FluxVisual.keepChat" in s:
+              ok("SecretChatHelper: уже пропатчен")
+          else:
+              s, n = pat.subn(lambda m: m.group(1) + " && !FluxVisual.keepChat()", s)
+              if n:
+                  write(p, s)
+                  ok("SecretChatHelper: секретный чат не удаляется, когда его закрыл собеседник (мест: %d)" % n)
+              else:
+                  warn("SecretChatHelper: якорь discarded+history_deleted не найден, секретные чаты удаляются как раньше")
+
+          # ============================================================ Сохранение чата: удалённые собеседником сообщения в обычных чатах
+          p = msg + "/SpyMode.java"
+          s = read(p)
+          old = "boolean keepDeleted = get(KEY_DELETED);"
+          if "FluxVisual.keepChat()" in s:
+              ok("SpyMode: уже пропатчен")
+          elif old in s:
+              s = s.replace(old, "boolean keepDeleted = get(KEY_DELETED) || FluxVisual.keepChat();", 1)
+              write(p, s)
+              ok("SpyMode: «Сохранять чат» включает хранение удалённого собеседником и в обычных чатах")
+          else:
+              warn("SpyMode: не нашёл keepDeleted, обычные чаты сохраняются только по настройке «Шпион»")
+
+          # ============================================================ Автозапуск: применить визуальный Premium при старте
+          p = msg + "/ApplicationLoader.java"
+          s = read(p)
+          pat = re.compile(r'(public void onCreate\(\)\s*\{\n)')
+          if "FluxVisual.startup" in s:
+              ok("ApplicationLoader: автозапуск FluxVisual уже подключён")
+          elif len(pat.findall(s)) == 1:
+              s = pat.sub(lambda m: m.group(1) + "        FluxVisual.startup();\n", s, count=1)
+              write(p, s)
+              ok("ApplicationLoader: автозапуск FluxVisual")
+          else:
+              warn("ApplicationLoader.onCreate не найден, Premium (визуал) применится при первом переключении")
+
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
+              f.write("## FluxGram: звёзды, интерфейс, Premium (визуал), сохранение чата\n```\n" + "\n".join(report) + "\n```\n")
+          PY
+
       - name: API ключи (необязательно, из secrets APP_ID / APP_HASH)
         env:
           S_APP_ID: ${{ secrets.APP_ID }}
