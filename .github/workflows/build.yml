@@ -2418,7 +2418,7 @@ jobs:
           print("flux_badge.webp создан")
           PY
 
-      - name: FluxGram - Java-классы (значок с частицами и Material You)
+      - name: FluxGram - Java-классы (значок, официальный канал, Material You, экран тем)
         env:
           MATERIAL_YOU: ${{ inputs.material_you }}
           BADGE_PARTICLES: ${{ inputs.badge_particles }}
@@ -2440,22 +2440,32 @@ jobs:
           import android.graphics.drawable.Drawable;
           import android.os.SystemClock;
 
-          // Значок FluxGram с частицами: искры вращаются вокруг значка и мерцают
+          // Значок FluxGram с частицами. official = значок официального канала (синяя «галочка» и золотые искры)
           public class FluxBadgeDrawable extends Drawable {
 
-              private static final boolean PARTICLES = FLUX_PARTICLES_DEFAULT;
               private static final int N = 9;
               private static final int[] COLORS = {0xFF7FD6FF, 0xFFFFFFFF, 0xFFB388FF, 0xFF8CF0D0};
+              private static final int[] COLORS_OFFICIAL = {0xFFFFD54F, 0xFFFFFFFF, 0xFF7FD6FF, 0xFFFFB74D};
 
               private final Drawable icon;
               private final boolean animated;
+              private final boolean official;
+              private final boolean particles;
               private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
               private final Path star = new Path();
+              private final Path check = new Path();
               private final int size;
 
-              public FluxBadgeDrawable(Context ctx, boolean animated) {
+              public static boolean particlesEnabled(Context ctx) {
+                  return ctx.getSharedPreferences("fluxgram_prefs", Context.MODE_PRIVATE)
+                          .getBoolean("flux_particles", FLUX_PARTICLES_DEFAULT);
+              }
+
+              public FluxBadgeDrawable(Context ctx, boolean animated, boolean official) {
                   this.icon = ctx.getResources().getDrawable(R.drawable.flux_badge).mutate();
-                  this.animated = animated && PARTICLES;
+                  this.particles = particlesEnabled(ctx);
+                  this.animated = animated && particles;
+                  this.official = official;
                   this.size = AndroidUtilities.dp(22);
                   setBounds(0, 0, size, size);
               }
@@ -2469,9 +2479,19 @@ jobs:
                   int half = (int) (s * 0.32f);
                   icon.setBounds((int) cx - half, (int) cy - half, (int) cx + half, (int) cy + half);
                   icon.draw(canvas);
-                  if (!PARTICLES) {
-                      return;
+                  if (particles) {
+                      drawParticles(canvas, cx, cy, s);
                   }
+                  if (official) {
+                      drawCheck(canvas, cx + half * 0.85f, cy + half * 0.85f, s * 0.17f);
+                  }
+                  if (animated) {
+                      invalidateSelf();
+                  }
+              }
+
+              private void drawParticles(Canvas canvas, float cx, float cy, float s) {
+                  int[] colors = official ? COLORS_OFFICIAL : COLORS;
                   float t = animated ? (SystemClock.uptimeMillis() % 7000L) / 7000f : 0.2f;
                   for (int i = 0; i < N; i++) {
                       float dir = (i % 2 == 0) ? 1f : -1f;
@@ -2481,7 +2501,8 @@ jobs:
                       float px = cx + (float) Math.cos(angle) * r;
                       float py = cy + (float) Math.sin(angle) * r;
                       float tw = 0.35f + 0.65f * Math.abs(pulse);
-                      paint.setColor(COLORS[i % COLORS.length]);
+                      paint.setStyle(Paint.Style.FILL);
+                      paint.setColor(colors[i % colors.length]);
                       paint.setAlpha((int) (255 * tw));
                       float pr = AndroidUtilities.dpf2(0.7f + 0.5f * (i % 3)) * (0.7f + 0.5f * tw);
                       if (i % 3 == 0) {
@@ -2490,9 +2511,24 @@ jobs:
                           canvas.drawCircle(px, py, pr, paint);
                       }
                   }
-                  if (animated) {
-                      invalidateSelf();
-                  }
+              }
+
+              private void drawCheck(Canvas c, float x, float y, float r) {
+                  paint.setStyle(Paint.Style.FILL);
+                  paint.setColor(0xFF2AABEE);
+                  paint.setAlpha(255);
+                  c.drawCircle(x, y, r, paint);
+                  check.reset();
+                  check.moveTo(x - r * 0.45f, y);
+                  check.lineTo(x - r * 0.1f, y + r * 0.38f);
+                  check.lineTo(x + r * 0.5f, y - r * 0.35f);
+                  paint.setStyle(Paint.Style.STROKE);
+                  paint.setStrokeCap(Paint.Cap.ROUND);
+                  paint.setStrokeJoin(Paint.Join.ROUND);
+                  paint.setStrokeWidth(Math.max(1f, r * 0.28f));
+                  paint.setColor(0xFFFFFFFF);
+                  c.drawPath(check, paint);
+                  paint.setStyle(Paint.Style.FILL);
               }
 
               private void drawStar(Canvas c, float x, float y, float r) {
@@ -2530,83 +2566,209 @@ jobs:
           import org.telegram.tgnet.TLRPC;
 
           import java.lang.reflect.Field;
+          import java.util.ArrayDeque;
+          import java.util.HashSet;
+          import java.util.Set;
 
           public final class FluxBadge implements NotificationCenter.NotificationCenterDelegate {
 
-              // Невидимая метка в конце «О себе»
+              // Невидимая метка в конце «О себе»: так друг друга находят пользователи FluxGram
               public static final String MARK = "\u2060\u200B\u2060";
-              private static final int MAX_ABOUT = 70;
+              public static final String OFFICIAL_CHANNEL = "FluxGraam";
+              private static final String PREFS = "fluxgram_prefs";
+              private static final String KNOWN = "flux_known_users";
               private static boolean inited;
               private static final FluxBadge INSTANCE = new FluxBadge();
+              private static final Set<Long> known = new HashSet<>();
+              private static final Set<Long> asked = new HashSet<>();
+              private static final ArrayDeque<TLRPC.User> queue = new ArrayDeque<>();
+              private static boolean drainScheduled;
+              private static boolean refreshScheduled;
+              private static int askedTotal;
+
+              // ---------- проверки ----------
 
               public static boolean isFluxUser(String about) {
                   return about != null && about.contains(MARK);
               }
 
-              // Свой аккаунт всегда с значком (не ждём загрузки профиля), чужие — по метке
+              // Свой аккаунт всегда со значком, чужие — по метке в «О себе» или по сохранённому списку
               public static boolean isFluxUser(long userId, String about) {
+                  init(UserConfig.selectedAccount);
                   if (isSelf(userId) && enabled()) {
                       return true;
                   }
-                  return isFluxUser(about);
+                  if (isFluxUser(about)) {
+                      remember(userId, true);
+                      return true;
+                  }
+                  synchronized (known) {
+                      return known.contains(userId);
+                  }
               }
 
               public static boolean isSelf(long userId) {
                   return userId != 0 && userId == UserConfig.getInstance(UserConfig.selectedAccount).getClientUserId();
               }
 
-              public static boolean enabled() {
-                  SharedPreferences p = ApplicationLoader.applicationContext
-                          .getSharedPreferences("fluxgram_prefs", Context.MODE_PRIVATE);
-                  return p.getBoolean("flux_badge", true);
+              public static boolean isOfficialChannel(TLRPC.Chat chat) {
+                  return chat != null && chat.username != null && chat.username.equalsIgnoreCase(OFFICIAL_CHANNEL);
               }
+
+              public static boolean enabled() {
+                  return prefs().getBoolean("flux_badge", true);
+              }
+
+              private static SharedPreferences prefs() {
+                  return ApplicationLoader.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+              }
+
+              // ---------- значки ----------
 
               // Статичный вариант для списков (ImageSpan не умеет анимироваться)
               public static Drawable drawable(Context ctx) {
-                  return new FluxBadgeDrawable(ctx, false);
+                  return new FluxBadgeDrawable(ctx, false, false);
               }
 
               // Анимированный вариант с частицами для заголовков (SimpleTextView / профиль)
               public static Drawable drawableAnimated(Context ctx) {
-                  return new FluxBadgeDrawable(ctx, true);
+                  return new FluxBadgeDrawable(ctx, true, false);
+              }
+
+              public static Drawable officialDrawable(Context ctx) {
+                  return new FluxBadgeDrawable(ctx, true, true);
               }
 
               public static void showInfo(Context ctx) {
                   Toast.makeText(ctx, "Этот пользователь использует FluxGram", Toast.LENGTH_SHORT).show();
               }
 
-              // Значок после имени (для списков)
-              public static CharSequence wrapUser(Context ctx, CharSequence name, TLRPC.User user) {
-                  if (name == null || user == null) {
-                      return name;
-                  }
-                  init(UserConfig.selectedAccount);
-                  String about = null;
-                  if (!isSelf(user.id)) {
-                      TLRPC.UserFull f = MessagesController.getInstance(UserConfig.selectedAccount).getUserFull(user.id);
-                      about = f == null ? null : f.about;
-                  }
-                  if (!isFluxUser(user.id, about)) {
-                      return name;
-                  }
-                  return append(ctx, name);
-              }
-
-              public static CharSequence append(Context ctx, CharSequence name) {
+              public static CharSequence append(Context ctx, CharSequence name, boolean official) {
                   SpannableStringBuilder sb = new SpannableStringBuilder(name).append(" \uFFFC");
-                  Drawable d = drawable(ctx);
+                  Drawable d = new FluxBadgeDrawable(ctx, false, official);
                   sb.setSpan(new ImageSpan(d, ImageSpan.ALIGN_BASELINE),
                           sb.length() - 1, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                   return sb;
               }
 
-              // Подписка на загрузку своего профиля и автоматическая метка
+              // Имя пользователя + значок (для списков и шапки чата)
+              public static CharSequence wrapUser(Context ctx, CharSequence name, TLRPC.User user) {
+                  if (name == null || user == null) {
+                      return name;
+                  }
+                  init(UserConfig.selectedAccount);
+                  if (isSelf(user.id)) {
+                      return enabled() ? append(ctx, name, false) : name;
+                  }
+                  boolean flux;
+                  synchronized (known) {
+                      flux = known.contains(user.id);
+                  }
+                  if (!flux) {
+                      // Профиль ещё не проверяли: ставим в очередь на тихую загрузку «О себе»
+                      check(user);
+                      return name;
+                  }
+                  return append(ctx, name, false);
+              }
+
+              // Название канала + значок официального канала
+              public static CharSequence wrapChat(Context ctx, CharSequence title, TLRPC.Chat chat) {
+                  if (title == null || !isOfficialChannel(chat)) {
+                      return title;
+                  }
+                  return append(ctx, title, true);
+              }
+
+              // ---------- обнаружение других пользователей FluxGram ----------
+
+              private static void remember(long uid, boolean flux) {
+                  boolean changed;
+                  synchronized (known) {
+                      changed = flux ? known.add(uid) : known.remove(uid);
+                      if (changed) {
+                          java.util.HashSet<String> out = new java.util.HashSet<>();
+                          for (Long l : known) {
+                              out.add(String.valueOf(l));
+                          }
+                          prefs().edit().putStringSet(KNOWN, out).apply();
+                      }
+                  }
+                  if (changed) {
+                      scheduleRefresh();
+                  }
+              }
+
+              private static void check(TLRPC.User user) {
+                  if (user.bot || user.deleted || asked.contains(user.id) || askedTotal > 400) {
+                      return;
+                  }
+                  asked.add(user.id);
+                  askedTotal++;
+                  queue.add(user);
+                  if (!drainScheduled) {
+                      drainScheduled = true;
+                      AndroidUtilities.runOnUIThread(DRAIN, 900);
+                  }
+              }
+
+              private static final Runnable DRAIN = new Runnable() {
+                  @Override
+                  public void run() {
+                      drainScheduled = false;
+                      TLRPC.User u = queue.poll();
+                      if (u != null) {
+                          try {
+                              MessagesController.getInstance(UserConfig.selectedAccount).loadFullUser(u, 0, false);
+                          } catch (Throwable t) {
+                              FileLog.e(t);
+                          }
+                      }
+                      if (!queue.isEmpty()) {
+                          drainScheduled = true;
+                          AndroidUtilities.runOnUIThread(this, 900);
+                      }
+                  }
+              };
+
+              private static void scheduleRefresh() {
+                  if (refreshScheduled) {
+                      return;
+                  }
+                  refreshScheduled = true;
+                  AndroidUtilities.runOnUIThread(() -> {
+                      refreshScheduled = false;
+                      try {
+                          NotificationCenter.getInstance(UserConfig.selectedAccount).postNotificationName(
+                                  NotificationCenter.updateInterfaces, MessagesController.UPDATE_MASK_NAME);
+                      } catch (Throwable t) {
+                          FileLog.e(t);
+                      }
+                  }, 500);
+              }
+
+              // ---------- метка в собственном профиле ----------
+
               public static void init(int account) {
                   if (inited) {
                       return;
                   }
                   inited = true;
-                  NotificationCenter.getInstance(account).addObserver(INSTANCE, NotificationCenter.userInfoDidLoad);
+                  try {
+                      Set<String> saved = prefs().getStringSet(KNOWN, null);
+                      if (saved != null) {
+                          synchronized (known) {
+                              for (String s : saved) {
+                                  known.add(Long.parseLong(s));
+                              }
+                          }
+                      }
+                  } catch (Throwable t) {
+                      FileLog.e(t);
+                  }
+                  for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+                      NotificationCenter.getInstance(a).addObserver(INSTANCE, NotificationCenter.userInfoDidLoad);
+                  }
                   ensureSelf(account);
               }
 
@@ -2634,8 +2796,9 @@ jobs:
                   if (isFluxUser(base)) {
                       return;
                   }
+                  int max = UserConfig.getInstance(account).isPremium() ? 140 : 70;
                   // Чужой текст не обрезаем: если «О себе» заполнено под завязку, метку не ставим
-                  if (base.length() + MARK.length() > MAX_ABOUT) {
+                  if (base.length() + MARK.length() > max) {
                       return;
                   }
                   try {
@@ -2658,11 +2821,16 @@ jobs:
 
               @Override
               public void didReceivedNotification(int id, int account, Object... args) {
-                  if (id == NotificationCenter.userInfoDidLoad) {
-                      long uid = (Long) args[0];
-                      if (uid == UserConfig.getInstance(account).getClientUserId()) {
-                          apply(account, ((TLRPC.UserFull) args[1]).about);
-                      }
+                  if (id != NotificationCenter.userInfoDidLoad || args == null || args.length < 2
+                          || !(args[0] instanceof Long) || !(args[1] instanceof TLRPC.UserFull)) {
+                      return;
+                  }
+                  long uid = (Long) args[0];
+                  String about = ((TLRPC.UserFull) args[1]).about;
+                  if (uid == UserConfig.getInstance(account).getClientUserId()) {
+                      apply(account, about);
+                  } else {
+                      remember(uid, isFluxUser(about));
                   }
               }
           }
@@ -2685,7 +2853,7 @@ jobs:
 
               private static final String PREFS = "fluxgram_prefs";
 
-              // Роли Material You 3: системные цвета для тёмной и светлой темы
+              // Роли Material You 3. Системные цвета (Android 12+) или палитра из выбранного оттенка
               public enum Role {
                   PRIMARY(android.R.color.system_accent1_200, android.R.color.system_accent1_600),
                   ON_PRIMARY(android.R.color.system_accent1_800, android.R.color.system_neutral1_0),
@@ -2730,19 +2898,126 @@ jobs:
               public static void setMaterialYou(Context c, boolean on) {
                   prefs(c).edit().putBoolean("material_you", on).apply();
                   materialYouCache = on;
-                  Theme.invalidateTheme();
+                  refresh();
               }
 
-              private static boolean isDark(Context c) {
+              // Выбранный оттенок: -1 = системные динамические цвета (обои), 0..360 = палитра из оттенка
+              public static int seedHue(Context c) {
+                  return prefs(c).getInt("flux_seed_hue", -1);
+              }
+
+              public static int seedSat(Context c) {
+                  return prefs(c).getInt("flux_seed_sat", 48);
+              }
+
+              public static void setSeedQuiet(Context c, int hue, int sat) {
+                  prefs(c).edit().putInt("flux_seed_hue", hue).putInt("flux_seed_sat", sat).apply();
+              }
+
+              public static void setSeed(Context c, int hue, int sat) {
+                  setSeedQuiet(c, hue, sat);
+                  refresh();
+              }
+
+              public static boolean amoled(Context c) {
+                  return prefs(c).getBoolean("flux_amoled", false);
+              }
+
+              public static void setAmoled(Context c, boolean on) {
+                  prefs(c).edit().putBoolean("flux_amoled", on).apply();
+                  refresh();
+              }
+
+              // Применить изменения: сбросить цвета и сообщить интерфейсу о смене темы
+              public static void refresh() {
+                  try {
+                      Theme.invalidateTheme();
+                  } catch (Throwable t) {
+                      FileLog.e(t);
+                  }
+                  try {
+                      NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.didSetNewTheme, false);
+                  } catch (Throwable t) {
+                      FileLog.e(t);
+                  }
+              }
+
+              public static boolean isDark(Context c) {
                   int mode = c.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
                   return mode == Configuration.UI_MODE_NIGHT_YES;
               }
 
+              private static boolean systemColors(Context c) {
+                  return seedHue(c) < 0;
+              }
+
+              // Цвет роли для текущей темы. fallback — если Material You выключен
               public static int role(Context c, Role role, int fallback) {
-                  if (!isMaterialYou(c) || Build.VERSION.SDK_INT < 31) {
+                  if (!isMaterialYou(c)) {
                       return fallback;
                   }
-                  return c.getResources().getColor(isDark(c) ? role.dark : role.light, c.getTheme());
+                  if (systemColors(c) && Build.VERSION.SDK_INT < 31) {
+                      return fallback;
+                  }
+                  return preview(c, role, isDark(c));
+              }
+
+              // Цвет роли независимо от переключателей (для превью в настройках)
+              public static int preview(Context c, Role role, boolean dark) {
+                  int hue = seedHue(c);
+                  if (hue < 0) {
+                      if (Build.VERSION.SDK_INT >= 31) {
+                          return c.getResources().getColor(dark ? role.dark : role.light, c.getTheme());
+                      }
+                      hue = 205;
+                  }
+                  return palette(role, dark, hue, seedSat(c) / 100f, amoled(c));
+              }
+
+              public static int systemColor(Context c, Role role, boolean dark) {
+                  return c.getResources().getColor(dark ? role.dark : role.light, c.getTheme());
+              }
+
+              public static int paletteColor(Role role, boolean dark, int hue, float sat) {
+                  return palette(role, dark, hue, sat, false);
+              }
+
+              // Тональная палитра из оттенка (упрощённая модель HCT на основе HSL)
+              private static int palette(Role r, boolean dark, float h, float s, boolean amoled) {
+                  float n = Math.min(0.12f, s * 0.22f);
+                  switch (r) {
+                      case PRIMARY: return hsl(h, s, dark ? 0.80f : 0.40f);
+                      case ON_PRIMARY: return dark ? hsl(h, s, 0.20f) : 0xFFFFFFFF;
+                      case PRIMARY_CONTAINER: return hsl(h, s * 0.9f, dark ? 0.30f : 0.90f);
+                      case ON_PRIMARY_CONTAINER: return hsl(h, s, dark ? 0.90f : 0.10f);
+                      case SECONDARY_CONTAINER: return hsl(h + 15, s * 0.35f, dark ? 0.30f : 0.90f);
+                      case ON_SECONDARY_CONTAINER: return hsl(h + 15, s * 0.35f, dark ? 0.90f : 0.10f);
+                      case TERTIARY: return hsl(h + 60, s * 0.7f, dark ? 0.80f : 0.40f);
+                      case TERTIARY_CONTAINER: return hsl(h + 60, s * 0.7f, dark ? 0.30f : 0.90f);
+                      case ON_TERTIARY_CONTAINER: return hsl(h + 60, s * 0.7f, dark ? 0.90f : 0.10f);
+                      case SURFACE: return dark ? (amoled ? 0xFF000000 : hsl(h, n, 0.09f)) : hsl(h, n, 0.98f);
+                      case SURFACE_CONTAINER: return dark ? (amoled ? hsl(h, n, 0.05f) : hsl(h, n, 0.13f)) : hsl(h, n, 0.95f);
+                      case SURFACE_CONTAINER_HIGH: return dark ? (amoled ? hsl(h, n, 0.10f) : hsl(h, n, 0.18f)) : hsl(h, n, 0.92f);
+                      case SURFACE_VARIANT: return dark ? (amoled ? hsl(h, n, 0.08f) : hsl(h, n, 0.17f)) : hsl(h, n, 0.90f);
+                      case ON_SURFACE: return hsl(h, n, dark ? 0.90f : 0.10f);
+                      case ON_SURFACE_VARIANT: return hsl(h, n, dark ? 0.78f : 0.30f);
+                      default: return hsl(h, n, dark ? 0.55f : 0.45f);
+                  }
+              }
+
+              private static int hsl(float h, float s, float l) {
+                  h = ((h % 360f) + 360f) % 360f;
+                  float c = (1f - Math.abs(2f * l - 1f)) * s;
+                  float x = c * (1f - Math.abs((h / 60f) % 2f - 1f));
+                  float m = l - c / 2f;
+                  float r, g, b;
+                  if (h < 60) { r = c; g = x; b = 0; }
+                  else if (h < 120) { r = x; g = c; b = 0; }
+                  else if (h < 180) { r = 0; g = c; b = x; }
+                  else if (h < 240) { r = 0; g = x; b = c; }
+                  else if (h < 300) { r = x; g = 0; b = c; }
+                  else { r = c; g = 0; b = x; }
+                  return 0xFF000000 | (Math.round((r + m) * 255) << 16) | (Math.round((g + m) * 255) << 8) | Math.round((b + m) * 255);
               }
 
               private static void put(String[] names, Role role) {
@@ -2808,7 +3083,10 @@ jobs:
               // Переопределение цвета ключа Telegram. null = не трогаем
               public static Integer override(int key) {
                   Context c = ApplicationLoader.applicationContext;
-                  if (c == null || Build.VERSION.SDK_INT < 31 || !isMaterialYou(c)) {
+                  if (c == null || !isMaterialYou(c)) {
+                      return null;
+                  }
+                  if (systemColors(c) && Build.VERSION.SDK_INT < 31) {
                       return null;
                   }
                   Role r = table().get(key);
@@ -2825,22 +3103,407 @@ jobs:
           }
           JAVA
 
+          U=TMessagesProj/src/main/java/org/telegram/ui
+          mkdir -p "$U"
+          mkdir -p TMessagesProj/src/main/res/drawable
+          cat > TMessagesProj/src/main/res/drawable/settings_fluxgram_themes.xml <<'XML'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF"
+                  android:pathData="M12,3c-4.97,0 -9,4.03 -9,9s4.03,9 9,9c0.83,0 1.5,-0.67 1.5,-1.5 0,-0.39 -0.15,-0.74 -0.39,-1.01 -0.23,-0.26 -0.38,-0.61 -0.38,-0.99 0,-0.83 0.67,-1.5 1.5,-1.5L16,16c2.76,0 5,-2.24 5,-5 0,-4.42 -4.03,-8 -9,-8zM6.5,12c-0.83,0 -1.5,-0.67 -1.5,-1.5S5.67,9 6.5,9 8,9.67 8,10.5 7.33,12 6.5,12zM9.5,8C8.67,8 8,7.33 8,6.5S8.67,5 9.5,5s1.5,0.67 1.5,1.5S10.33,8 9.5,8zM14.5,8c-0.83,0 -1.5,-0.67 -1.5,-1.5S13.67,5 14.5,5s1.5,0.67 1.5,1.5S15.33,8 14.5,8zM17.5,12c-0.83,0 -1.5,-0.67 -1.5,-1.5S16.67,9 17.5,9s1.5,0.67 1.5,1.5S18.33,12 17.5,12z"/>
+          </vector>
+          XML
+
+          cat > "$U/FluxThemesActivity.java" <<'JAVA'
+          package org.telegram.ui;
+
+          import android.content.Context;
+          import android.graphics.Canvas;
+          import android.graphics.Paint;
+          import android.graphics.RectF;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.Build;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.FrameLayout;
+          import android.widget.HorizontalScrollView;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.SeekBar;
+          import android.widget.TextView;
+
+          import org.telegram.messenger.AndroidUtilities;
+          import org.telegram.messenger.FluxFeatures;
+          import org.telegram.messenger.FluxFeatures.Role;
+          import org.telegram.messenger.R;
+          import org.telegram.ui.ActionBar.ActionBar;
+          import org.telegram.ui.ActionBar.BaseFragment;
+          import org.telegram.ui.ActionBar.Theme;
+          import org.telegram.ui.Cells.HeaderCell;
+          import org.telegram.ui.Cells.TextCheckCell;
+
+          import java.util.ArrayList;
+          import java.util.Random;
+
+          // Темы FluxGram: динамические цвета Material You 3, свои оттенки, AMOLED и живое превью
+          public class FluxThemesActivity extends BaseFragment {
+
+              private static final String[] NAMES = {"Системные", "Океан", "Закат", "Лес", "Лаванда", "Роза", "Янтарь", "Бирюза", "Графит"};
+              private static final int[] HUES = {-1, 205, 18, 135, 265, 335, 42, 175, 215};
+              private static final int[] SATS = {48, 52, 62, 42, 50, 56, 72, 50, 7};
+
+              private Context ctx;
+              private PreviewView preview;
+              private final ArrayList<Swatch> swatches = new ArrayList<>();
+              private SeekBar hueBar;
+              private SeekBar satBar;
+              private TextView hueLabel;
+
+              @Override
+              public View createView(Context context) {
+                  ctx = context;
+                  actionBar.setBackButtonImage(R.drawable.ic_ab_back);
+                  actionBar.setAllowOverlayTitle(true);
+                  actionBar.setTitle("Темы FluxGram");
+                  actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
+                      @Override
+                      public void onItemClick(int id) {
+                          if (id == -1) {
+                              finishFragment();
+                          }
+                      }
+                  });
+
+                  FrameLayout root = new FrameLayout(context);
+                  root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
+                  fragmentView = root;
+
+                  ScrollView scroll = new ScrollView(context);
+                  root.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                  LinearLayout list = new LinearLayout(context);
+                  list.setOrientation(LinearLayout.VERTICAL);
+                  scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  // --- превью: светлая и тёмная тема рядом
+                  addHeader(list, "Предпросмотр");
+                  preview = new PreviewView(context);
+                  list.addView(preview, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, AndroidUtilities.dp(210)));
+
+                  // --- включатель
+                  TextCheckCell my = newCell();
+                  my.setTextAndCheck("Динамические цвета Material You 3", FluxFeatures.isMaterialYou(context), false);
+                  my.setOnClickListener(v -> {
+                      boolean on = !FluxFeatures.isMaterialYou(context);
+                      FluxFeatures.setMaterialYou(context, on);
+                      my.setChecked(on);
+                      preview.invalidate();
+                  });
+                  list.addView(my, matchWrap());
+                  addNote(list, "Цвета приложения берутся из вашей палитры. «Системные» подхватывают обои (Android 12+), остальные работают на любой версии Android.");
+
+                  // --- палитры
+                  addHeader(list, "Палитра");
+                  HorizontalScrollView hs = new HorizontalScrollView(context);
+                  hs.setHorizontalScrollBarEnabled(false);
+                  hs.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  LinearLayout row = new LinearLayout(context);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  row.setPadding(AndroidUtilities.dp(12), AndroidUtilities.dp(10), AndroidUtilities.dp(12), AndroidUtilities.dp(10));
+                  for (int i = 0; i < NAMES.length; i++) {
+                      if (HUES[i] < 0 && Build.VERSION.SDK_INT < 31) {
+                          continue;
+                      }
+                      final int hue = HUES[i];
+                      final int sat = SATS[i];
+                      LinearLayout cellBox = new LinearLayout(context);
+                      cellBox.setOrientation(LinearLayout.VERTICAL);
+                      cellBox.setGravity(Gravity.CENTER_HORIZONTAL);
+                      cellBox.setPadding(AndroidUtilities.dp(6), 0, AndroidUtilities.dp(6), 0);
+                      Swatch sw = new Swatch(context, hue, sat);
+                      sw.setOnClickListener(v -> choose(hue, sat));
+                      swatches.add(sw);
+                      cellBox.addView(sw, new LinearLayout.LayoutParams(AndroidUtilities.dp(56), AndroidUtilities.dp(56)));
+                      TextView label = new TextView(context);
+                      label.setText(NAMES[i]);
+                      label.setTextSize(11);
+                      label.setGravity(Gravity.CENTER);
+                      label.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+                      cellBox.addView(label, new LinearLayout.LayoutParams(AndroidUtilities.dp(64), ViewGroup.LayoutParams.WRAP_CONTENT));
+                      row.addView(cellBox);
+                  }
+                  hs.addView(row);
+                  list.addView(hs, matchWrap());
+
+                  // --- свой оттенок
+                  addHeader(list, "Свой оттенок");
+                  LinearLayout sliders = new LinearLayout(context);
+                  sliders.setOrientation(LinearLayout.VERTICAL);
+                  sliders.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  sliders.setPadding(AndroidUtilities.dp(18), AndroidUtilities.dp(6), AndroidUtilities.dp(18), AndroidUtilities.dp(12));
+                  hueLabel = new TextView(context);
+                  hueLabel.setTextSize(14);
+                  hueLabel.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                  sliders.addView(hueLabel, matchWrap());
+                  hueBar = new SeekBar(context);
+                  hueBar.setMax(360);
+                  sliders.addView(hueBar, matchWrap());
+                  TextView satText = new TextView(context);
+                  satText.setText("Насыщенность");
+                  satText.setTextSize(14);
+                  satText.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                  satText.setPadding(0, AndroidUtilities.dp(8), 0, 0);
+                  sliders.addView(satText, matchWrap());
+                  satBar = new SeekBar(context);
+                  satBar.setMax(100);
+                  sliders.addView(satBar, matchWrap());
+                  list.addView(sliders, matchWrap());
+
+                  SeekBar.OnSeekBarChangeListener l = new SeekBar.OnSeekBarChangeListener() {
+                      @Override
+                      public void onProgressChanged(SeekBar bar, int p, boolean fromUser) {
+                          if (!fromUser) {
+                              return;
+                          }
+                          FluxFeatures.setSeedQuiet(ctx, hueBar.getProgress(), Math.max(4, satBar.getProgress()));
+                          updateUi();
+                      }
+
+                      @Override public void onStartTrackingTouch(SeekBar bar) { }
+
+                      @Override
+                      public void onStopTrackingTouch(SeekBar bar) {
+                          FluxFeatures.refresh();
+                      }
+                  };
+                  hueBar.setOnSeekBarChangeListener(l);
+                  satBar.setOnSeekBarChangeListener(l);
+
+                  // --- кубик
+                  TextView dice = new TextView(context);
+                  dice.setText("🎲  Случайная палитра");
+                  dice.setTextSize(16);
+                  dice.setGravity(Gravity.CENTER);
+                  dice.setOnClickListener(v -> {
+                      Random rnd = new Random();
+                      choose(rnd.nextInt(360), 40 + rnd.nextInt(35));
+                  });
+                  LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, AndroidUtilities.dp(52));
+                  dlp.setMargins(AndroidUtilities.dp(16), AndroidUtilities.dp(14), AndroidUtilities.dp(16), AndroidUtilities.dp(6));
+                  list.addView(dice, dlp);
+                  styleDice(dice);
+
+                  // --- дополнительно
+                  addHeader(list, "Оформление");
+                  TextCheckCell amoled = newCell();
+                  amoled.setTextAndCheck("Чёрный AMOLED фон в тёмной теме", FluxFeatures.amoled(context), true);
+                  amoled.setOnClickListener(v -> {
+                      boolean on = !FluxFeatures.amoled(context);
+                      FluxFeatures.setAmoled(context, on);
+                      amoled.setChecked(on);
+                      preview.invalidate();
+                  });
+                  list.addView(amoled, matchWrap());
+
+                  final android.content.SharedPreferences sp = context.getSharedPreferences("fluxgram_prefs", Context.MODE_PRIVATE);
+                  TextCheckCell badge = newCell();
+                  badge.setTextAndCheck("Значок FluxGram рядом с ником", sp.getBoolean("flux_badge", true), true);
+                  badge.setOnClickListener(v -> {
+                      boolean on = !sp.getBoolean("flux_badge", true);
+                      sp.edit().putBoolean("flux_badge", on).apply();
+                      badge.setChecked(on);
+                  });
+                  list.addView(badge, matchWrap());
+
+                  TextCheckCell parts = newCell();
+                  parts.setTextAndCheck("Частицы вокруг значка", sp.getBoolean("flux_particles", true), false);
+                  parts.setOnClickListener(v -> {
+                      boolean on = !sp.getBoolean("flux_particles", true);
+                      sp.edit().putBoolean("flux_particles", on).apply();
+                      parts.setChecked(on);
+                  });
+                  list.addView(parts, matchWrap());
+                  addNote(list, "Значок видят другие пользователи FluxGram. Частицы анимируются в профиле.");
+
+                  updateUi();
+                  return fragmentView;
+              }
+
+              private void choose(int hue, int sat) {
+                  FluxFeatures.setSeed(ctx, hue, sat);
+                  updateUi();
+              }
+
+              private void updateUi() {
+                  int hue = FluxFeatures.seedHue(ctx);
+                  int sat = FluxFeatures.seedSat(ctx);
+                  if (hue >= 0) {
+                      hueBar.setProgress(hue);
+                      satBar.setProgress(sat);
+                      hueLabel.setText("Оттенок: " + hue + "°");
+                  } else {
+                      hueLabel.setText("Оттенок: системный (обои)");
+                  }
+                  for (Swatch sw : swatches) {
+                      sw.invalidate();
+                  }
+                  preview.invalidate();
+              }
+
+              private void styleDice(TextView dice) {
+                  GradientDrawable g = new GradientDrawable();
+                  g.setCornerRadius(AndroidUtilities.dp(26));
+                  g.setColor(FluxFeatures.preview(ctx, Role.PRIMARY_CONTAINER, FluxFeatures.isDark(ctx)));
+                  dice.setBackground(g);
+                  dice.setTextColor(FluxFeatures.preview(ctx, Role.ON_PRIMARY_CONTAINER, FluxFeatures.isDark(ctx)));
+              }
+
+              private LinearLayout.LayoutParams matchWrap() {
+                  return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+              }
+
+              private TextCheckCell newCell() {
+                  TextCheckCell cell = new TextCheckCell(ctx);
+                  cell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  return cell;
+              }
+
+              private void addHeader(LinearLayout list, String title) {
+                  HeaderCell header = new HeaderCell(ctx);
+                  header.setText(title);
+                  header.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  list.addView(header, matchWrap());
+              }
+
+              private void addNote(LinearLayout list, String text) {
+                  TextView note = new TextView(ctx);
+                  note.setText(text);
+                  note.setTextSize(14);
+                  note.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+                  note.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(10), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
+                  list.addView(note, matchWrap());
+              }
+
+              // Круг-образец палитры с кольцом выбранного
+              private class Swatch extends View {
+                  private final int hue;
+                  private final int sat;
+                  private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+                  Swatch(Context c, int hue, int sat) {
+                      super(c);
+                      this.hue = hue;
+                      this.sat = sat;
+                  }
+
+                  private int color(Role r) {
+                      boolean dark = FluxFeatures.isDark(getContext());
+                      if (hue < 0) {
+                          return Build.VERSION.SDK_INT >= 31 ? FluxFeatures.systemColor(getContext(), r, dark) : 0xFF888888;
+                      }
+                      return FluxFeatures.paletteColor(r, dark, hue, sat / 100f);
+                  }
+
+                  @Override
+                  protected void onDraw(Canvas canvas) {
+                      float cx = getWidth() / 2f;
+                      float cy = getHeight() / 2f;
+                      float r = Math.min(cx, cy) - AndroidUtilities.dp(4);
+                      p.setStyle(Paint.Style.FILL);
+                      p.setColor(color(Role.PRIMARY_CONTAINER));
+                      canvas.drawCircle(cx, cy, r, p);
+                      p.setColor(color(Role.PRIMARY));
+                      canvas.drawArc(new RectF(cx - r, cy - r, cx + r, cy + r), -90, 180, true, p);
+                      p.setColor(color(Role.TERTIARY));
+                      canvas.drawCircle(cx, cy, r * 0.35f, p);
+                      boolean sel = FluxFeatures.seedHue(getContext()) == hue && (hue < 0 || FluxFeatures.seedSat(getContext()) == sat);
+                      if (sel) {
+                          p.setStyle(Paint.Style.STROKE);
+                          p.setStrokeWidth(AndroidUtilities.dp(3));
+                          p.setColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                          canvas.drawCircle(cx, cy, r + AndroidUtilities.dp(2), p);
+                      }
+                  }
+              }
+
+              // Две мини-панели: светлая и тёмная версия чата в выбранной палитре
+              private class PreviewView extends View {
+                  private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final RectF rf = new RectF();
+
+                  PreviewView(Context c) {
+                      super(c);
+                  }
+
+                  private int col(Role r, boolean dark) {
+                      return FluxFeatures.preview(getContext(), r, dark);
+                  }
+
+                  @Override
+                  protected void onDraw(Canvas canvas) {
+                      int pad = AndroidUtilities.dp(14);
+                      int gap = AndroidUtilities.dp(12);
+                      int w = (getWidth() - pad * 2 - gap) / 2;
+                      int h = getHeight() - AndroidUtilities.dp(16);
+                      drawPanel(canvas, pad, AndroidUtilities.dp(8), w, h, false);
+                      drawPanel(canvas, pad + w + gap, AndroidUtilities.dp(8), w, h, true);
+                  }
+
+                  private void box(Canvas c, float l, float t, float r, float b, float rad, int color) {
+                      p.setStyle(Paint.Style.FILL);
+                      p.setColor(color);
+                      rf.set(l, t, r, b);
+                      c.drawRoundRect(rf, rad, rad, p);
+                  }
+
+                  private void drawPanel(Canvas c, int x, int y, int w, int h, boolean dark) {
+                      int d = AndroidUtilities.dp(1);
+                      box(c, x, y, x + w, y + h, AndroidUtilities.dp(24), col(Role.SURFACE, dark));
+                      // верхняя панель
+                      box(c, x + d * 10, y + d * 10, x + w - d * 10, y + d * 34, d * 12, col(Role.SURFACE_CONTAINER, dark));
+                      box(c, x + d * 18, y + d * 18, x + d * 70, y + d * 26, d * 4, col(Role.ON_SURFACE, dark));
+                      // входящее сообщение
+                      box(c, x + d * 10, y + d * 44, x + w * 0.72f, y + d * 78, d * 14, col(Role.SURFACE_CONTAINER_HIGH, dark));
+                      box(c, x + d * 20, y + d * 56, x + w * 0.5f, y + d * 62, d * 3, col(Role.ON_SURFACE_VARIANT, dark));
+                      // исходящее
+                      box(c, x + w * 0.28f, y + d * 86, x + w - d * 10, y + d * 120, d * 14, col(Role.PRIMARY_CONTAINER, dark));
+                      box(c, x + w * 0.4f, y + d * 98, x + w * 0.82f, y + d * 104, d * 3, col(Role.ON_PRIMARY_CONTAINER, dark));
+                      // чипы
+                      box(c, x + d * 10, y + d * 130, x + d * 56, y + d * 148, d * 9, col(Role.SECONDARY_CONTAINER, dark));
+                      box(c, x + d * 62, y + d * 130, x + d * 100, y + d * 148, d * 9, col(Role.TERTIARY_CONTAINER, dark));
+                      // FAB
+                      float fb = y + h - d * 12;
+                      box(c, x + w - d * 56, fb - d * 44, x + w - d * 12, fb, d * 14, col(Role.PRIMARY_CONTAINER, dark));
+                      box(c, x + w - d * 42, fb - d * 30, x + w - d * 26, fb - d * 14, d * 4, col(Role.ON_PRIMARY_CONTAINER, dark));
+                      // поле ввода
+                      box(c, x + d * 10, fb - d * 36, x + w - d * 68, fb, d * 18, col(Role.SURFACE_VARIANT, dark));
+                  }
+              }
+          }
+          JAVA
+
           if [ "$MATERIAL_YOU" = "true" ]; then MY=true; else MY=false; fi
           sed -i "s/FLUX_MY_DEFAULT/$MY/" "$D/FluxFeatures.java"
           if [ "$BADGE_PARTICLES" = "false" ]; then PT=false; else PT=true; fi
           sed -i "s/FLUX_PARTICLES_DEFAULT/$PT/" "$D/FluxBadgeDrawable.java"
           echo "FluxBadge, FluxBadgeDrawable, FluxFeatures созданы (Material You: $MY, частицы: $PT)"
 
-      - name: FluxGram - патч Theme, UserCell, ProfileActivity, меню, шапка чата
+      - name: FluxGram - патчи (профиль, чат, официальный канал, пункт «Темы FluxGram»)
         run: |
           python3 - <<'PY'
           import re, os
 
           def read(p):
-              return open(p, encoding="utf-8").read()
+              try:
+                  return open(p, encoding="utf-8").read()
+              except FileNotFoundError:
+                  print("::warning::нет файла " + p)
+                  return ""
 
           def write(p, s):
-              open(p, "w", encoding="utf-8").write(s)
+              if s:
+                  open(p, "w", encoding="utf-8").write(s)
 
           def add_import(s):
               if "import org.telegram.messenger.FluxBadge;" in s:
@@ -2852,6 +3515,7 @@ jobs:
           def warn(m): print("::warning::" + m); report.append("FAIL " + m)
 
           SRC = "TMessagesProj/src/main/java/org/telegram/"
+          CTX = "org.telegram.messenger.ApplicationLoader.applicationContext"
 
           # 1. Material You: перехват цветов
           p = SRC + "ui/ActionBar/Theme.java"
@@ -2860,7 +3524,7 @@ jobs:
           if "FluxFeatures.override" in s:
               ok("Theme: уже пропатчен")
           elif s.count(sig) != 1:
-              warn("Theme.java: не найден getColorFromTable, Material You не подключён")
+              warn("Theme.java: не найден getColorFromTable, цвета Material You не подключены")
           else:
               s = s.replace(sig, sig + "        Integer fluxColor = org.telegram.messenger.FluxFeatures.override(key);\n"
                                        "        if (fluxColor != null) {\n"
@@ -2871,73 +3535,106 @@ jobs:
 
           # 2. Списки пользователей
           p = SRC + "ui/Cells/UserCell.java"
-          s = read(p)
-          pat = re.compile(r'(?m)^(\s*)nameTextView\.setText\(name\);\n')
-          if "FluxBadge" in s:
-              ok("UserCell: уже пропатчен")
-          elif len(pat.findall(s)) != 2:
-              warn("UserCell.java: якоря не найдены, значок в списках не подключён")
-          else:
-              s = pat.sub(lambda m: m.group(1) + "name = FluxBadge.wrapUser(getContext(), name, currentUser);\n" + m.group(0), s)
-              write(p, add_import(s))
-              ok("UserCell: значок в списках")
+          if os.path.exists(p):
+              s = read(p)
+              pat = re.compile(r'(?m)^(\s*)nameTextView\.setText\(name\);\n')
+              if "FluxBadge" in s:
+                  ok("UserCell: уже пропатчен")
+              elif len(pat.findall(s)) != 2:
+                  warn("UserCell.java: якоря не найдены, значок в списках пользователей не подключён")
+              else:
+                  s = pat.sub(lambda m: m.group(1) + "name = FluxBadge.wrapUser(getContext(), name, currentUser);\n" + m.group(0), s)
+                  write(p, add_import(s))
+                  ok("UserCell: значок в списках пользователей")
 
-          # 3. Профиль: значок с частицами и тап
+          # 3. Профиль: пользователь (значок с частицами) и канал (значок официального канала)
           p = SRC + "ui/ProfileActivity.java"
           s = read(p)
-          pat = re.compile(r'\} else \{\s*nameTextView\.setRightDrawable2\(null\);\s*nameTextViewRightDrawable2ContentDescription = null;\s*\}\s*if \(user != null && !MessagesController\.isSupportUser\(user\)')
-          m = pat.search(s)
           if "FluxBadge" in s:
               ok("ProfileActivity: уже пропатчен")
-          elif not m:
-              warn("ProfileActivity.java: якорь не найден, значок в профиле не подключён")
           else:
-              new = ("} else if (FluxBadge.isFluxUser(user != null ? user.id : 0, userInfo != null ? userInfo.about : null)) {\n"
-                     "                    nameTextView.setRightDrawable2(FluxBadge.drawableAnimated(getContext()));\n"
-                     "                    nameTextViewRightDrawable2ContentDescription = \"FluxGram\";\n"
-                     "                    nameTextView.setOnClickListener(v -> FluxBadge.showInfo(getContext()));\n"
-                     "                " + m.group(0))
-              s = s[:m.start()] + new + s[m.end():]
-              write(p, add_import(s))
-              ok("ProfileActivity: значок с частицами в профиле")
-
-          # 4. Боковое меню (свой ник)
-          p = SRC + "ui/Cells/DrawerProfileCell.java"
-          try:
-              s = read(p)
-              pat = re.compile(r'(?m)^(\s*)nameTextView\.setText\((.*UserObject\.getUserName\(user\).*)\);\n')
-              ms = pat.findall(s)
-              if "FluxBadge" in s:
-                  ok("DrawerProfileCell: уже пропатчен")
-              elif len(ms) != 1:
-                  warn("DrawerProfileCell.java: якорь не найден (совпадений: %d), значок в боковом меню не подключён" % len(ms))
-              else:
-                  s = pat.sub(lambda m: m.group(1) + "nameTextView.setText(FluxBadge.wrapUser(getContext(), " + m.group(2) + ", user));\n", s, count=1)
+              pat_u = re.compile(r'(\} else if \(user\.verified\) \{\s*nameTextView\.setRightDrawable2\(getVerifiedCrossfadeDrawable\(\)\);\s*'
+                                 r'nameTextViewRightDrawable2ContentDescription = [^;]+;\s*)\} else \{(\s*nameTextView\.setRightDrawable2\(null\);)')
+              s, n1 = pat_u.subn(lambda m: m.group(1) +
+                  "} else if (FluxBadge.isFluxUser(user.id, userInfo != null ? userInfo.about : null)) {\n"
+                  "                    nameTextView.setRightDrawable2(FluxBadge.drawableAnimated(getContext()));\n"
+                  "                    nameTextViewRightDrawable2ContentDescription = \"FluxGram\";\n"
+                  "                } else {" + m.group(2), s, count=1)
+              pat_c = re.compile(r'\} else if \(chat\.verified\) \{(\s*nameTextView\.setRightDrawable2\(getVerifiedCrossfadeDrawable\(\)\);)')
+              s, n2 = pat_c.subn(lambda m:
+                  "} else if (FluxBadge.isOfficialChannel(chat)) {\n"
+                  "                    nameTextView.setRightDrawable2(FluxBadge.officialDrawable(getContext()));\n"
+                  "                    nameTextViewRightDrawable2ContentDescription = \"Официальный канал FluxGram\";\n"
+                  "                } else if (chat.verified) {" + m.group(1), s, count=1)
+              if n1 or n2:
                   write(p, add_import(s))
-                  ok("DrawerProfileCell: значок в боковом меню")
-          except FileNotFoundError:
-              warn("DrawerProfileCell.java не найден")
+              if n1:
+                  ok("ProfileActivity: значок пользователя FluxGram")
+              else:
+                  warn("ProfileActivity: якорь пользователя не найден")
+              if n2:
+                  ok("ProfileActivity: значок официального канала")
+              else:
+                  warn("ProfileActivity: якорь канала не найден")
 
-          # 5. Шапка чата
+          # 4. Шапка чата: пользователь и официальный канал
           p = SRC + "ui/ChatActivity.java"
-          try:
-              s = read(p)
-              pat = re.compile(r'avatarContainer\.setTitle\((UserObject\.getUserName\(currentUser\))([,)])')
-              n = len(pat.findall(s))
-              if "FluxBadge" in s:
-                  ok("ChatActivity: уже пропатчен")
-              elif n == 0:
-                  warn("ChatActivity.java: якорь шапки чата не найден, значок в шапке чата не подключён")
-              else:
-                  s = pat.sub(lambda m: "avatarContainer.setTitle(FluxBadge.wrapUser(org.telegram.messenger.ApplicationLoader.applicationContext, "
-                                        + m.group(1) + ", currentUser)" + m.group(2), s)
+          s = read(p)
+          if "FluxBadge" in s:
+              ok("ChatActivity: уже пропатчен")
+          else:
+              pat_u = re.compile(r'avatarContainer\.setTitle\((AndroidUtilities\.removeRTL\(AndroidUtilities\.removeDiacritics\(UserObject\.getUserName\((currentUser|user)\)\)\))')
+              s, n1 = pat_u.subn(lambda m: "avatarContainer.setTitle(FluxBadge.wrapUser(" + CTX + ", " + m.group(1) + ", " + m.group(2) + ")", s)
+              pat_c = re.compile(r'avatarContainer\.setTitle\((AndroidUtilities\.removeRTL\(AndroidUtilities\.removeDiacritics\(currentChat\.title\)\)), currentChat\.scam, currentChat\.fake, currentChat\.verified,')
+              s, n2 = pat_c.subn(lambda m: "avatarContainer.setTitle(FluxBadge.wrapChat(" + CTX + ", " + m.group(1) + ", currentChat), currentChat.scam, currentChat.fake, currentChat.verified && !FluxBadge.isOfficialChannel(currentChat),", s)
+              if n1 or n2:
                   write(p, add_import(s))
-                  ok("ChatActivity: значок в шапке чата (мест: %d)" % n)
-          except FileNotFoundError:
-              warn("ChatActivity.java не найден")
+              if n1:
+                  ok("ChatActivity: значок в шапке личного чата (мест: %d)" % n1)
+              else:
+                  warn("ChatActivity: якорь шапки пользователя не найден")
+              if n2:
+                  ok("ChatActivity: значок официального канала в шапке (мест: %d)" % n2)
+              else:
+                  warn("ChatActivity: якорь шапки канала не найден")
+
+          # 5. Официальный канал: настоящая «галочка» во всех списках
+          p = SRC + "messenger/MessagesController.java"
+          s = read(p)
+          pat = re.compile(r'(public void putChat\(\s*(?:final )?TLRPC\.Chat chat,\s*boolean fromCache\)\s*\{\n)')
+          if "isOfficialChannel" in s:
+              ok("MessagesController: уже пропатчен")
+          elif len(pat.findall(s)) != 1:
+              warn("MessagesController.java: putChat не найден, «галочка» официального канала в списках чатов не подключена")
+          else:
+              s = pat.sub(lambda m: m.group(1) + "        if (chat != null && FluxBadge.isOfficialChannel(chat)) {\n            chat.verified = true;\n        }\n", s, count=1)
+              write(p, s)
+              ok("MessagesController: «галочка» официального канала в списках чатов")
+
+          # 6. Настройки: пункт «Темы FluxGram» рядом с «Настройки FluxGram»
+          p = SRC + "ui/SettingsActivity.java"
+          s = read(p)
+          if "FluxThemesActivity" in s:
+              ok("SettingsActivity: уже пропатчен")
+          else:
+              m = re.search(r'\n([ \t]*)items\.add\(SettingCell\.Factory\.of\(28,[^\n]*\);', s)
+              mc = re.search(r'\n([ \t]*)case 24:', s)
+              if not m or not mc:
+                  warn("SettingsActivity.java: нет пункта «Настройки FluxGram» (id 28) или case 24, раздел «Темы FluxGram» не добавлен")
+              else:
+                  ind = m.group(1)
+                  item = '\n' + ind + 'items.add(SettingCell.Factory.of(29, 0xFF2FC6A8, 0xFF1D9E86, R.drawable.settings_fluxgram_themes, "Темы FluxGram"));'
+                  s = s[:m.end()] + item + s[m.end():]
+                  mc = re.search(r'\n([ \t]*)case 24:', s)
+                  ind2 = mc.group(1)
+                  click = ('\n' + ind2 + 'case 29: {' + '\n' + ind2 + '    presentFragment(new FluxThemesActivity());' +
+                           '\n' + ind2 + '    break;' + '\n' + ind2 + '}')
+                  s = s[:mc.start()] + click + s[mc.start():]
+                  write(p, s)
+                  ok("SettingsActivity: пункт «Темы FluxGram»")
 
           with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
-              f.write("## Патчи значка и Material You\n```\n" + "\n".join(report) + "\n```\n")
+              f.write("## Патчи FluxGram (значок, официальный канал, темы)\n```\n" + "\n".join(report) + "\n```\n")
           PY
 
       - name: Нативные библиотеки (libvpx, ffmpeg, boringssl)
