@@ -91,18 +91,36 @@ jobs:
       - name: Системные пакеты
         run: |
           set +e
+          # azure.archive.ubuntu.com не резолвится на раннере -> переключаем apt на другие зеркала
+          for f in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
+            [ -f "$f" ] && sudo cp -n "$f" "$f.orig"
+          done
+          MIRRORS=(
+            "http://archive.ubuntu.com/ubuntu/"
+            "http://mirrors.edge.kernel.org/ubuntu/"
+            "http://us.archive.ubuntu.com/ubuntu/"
+            "http://mirror.yandex.ru/ubuntu/"
+            "http://azure.archive.ubuntu.com/ubuntu/"
+          )
           ok=0
-          for i in 1 2 3 4 5; do
-            if sudo apt-get update && \
-               sudo apt-get install -y --fix-missing ninja-build nasm yasm make cmake perl pkg-config; then
+          for i in 0 1 2 3 4; do
+            M="${MIRRORS[$i]}"
+            echo ">>> попытка $((i+1)): зеркало $M"
+            for f in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
+              [ -f "$f.orig" ] || continue
+              sudo cp "$f.orig" "$f"
+              sudo sed -i -E "s#mirror\+file:/etc/apt/apt-mirrors.txt#$M#g; s#https?://azure\.archive\.ubuntu\.com/ubuntu/?#$M#g; s#https?://security\.ubuntu\.com/ubuntu/?#$M#g" "$f"
+            done
+            if sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
+               && sudo apt-get install -y --fix-missing -o Acquire::Retries=3 \
+                    ninja-build nasm yasm make cmake perl pkg-config; then
               ok=1
               break
             fi
-            echo "::warning::apt, попытка $i не удалась, повтор через $((i*20)) сек..."
-            sudo rm -rf /var/lib/apt/lists/*
-            sleep $((i*20))
+            echo "::warning::apt, попытка $((i+1)) не удалась (зеркало $M)"
+            sleep 10
           done
-          [ "$ok" = 1 ] || { echo "::error::apt не смог установить пакеты после 5 попыток"; exit 1; }
+          [ "$ok" = 1 ] || { echo "::error::apt не смог установить пакеты ни с одного зеркала"; exit 1; }
 
       - name: Android SDK / NDK (версии берём из проекта)
         run: |
