@@ -1912,8 +1912,18 @@ jobs:
           S_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
         run: |
           mkdir -p TMessagesProj/config
+          # убираем случайные пробелы и переводы строк из секретов
+          S_STORE_PASS=$(printf %s "$S_STORE_PASS" | tr -d '\r\n')
+          S_KEY_ALIAS=$(printf %s "$S_KEY_ALIAS" | tr -d '\r\n ')
+          S_KEY_PASS=$(printf %s "$S_KEY_PASS" | tr -d '\r\n')
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 -d > TMessagesProj/config/release.keystore
+            # быстрая проверка до часовой сборки
+            if ! keytool -list -keystore TMessagesProj/config/release.keystore \
+                 -storepass "$S_STORE_PASS" -alias "$S_KEY_ALIAS" > /dev/null 2>&1; then
+              echo "::error::keystore не открывается: неверный KEYSTORE_PASSWORD или KEY_ALIAS. Сборка остановлена, чтобы не тратить час"
+              exit 1
+            fi
             echo "KS_STORE_PASS=${S_STORE_PASS}" >> "$GITHUB_ENV"
             echo "KS_ALIAS=${S_KEY_ALIAS}" >> "$GITHUB_ENV"
             echo "KS_KEY_PASS=${S_KEY_PASS}" >> "$GITHUB_ENV"
