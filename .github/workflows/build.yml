@@ -41,7 +41,7 @@ on:
         type: boolean
         default: true
       badge_particles:
-        description: "FluxGram: частицы вокруг значка по умолчанию (в приложении выключаются в «Темы FluxGram»)"
+        description: "FluxGram: частицы вокруг значка рядом с ником"
         type: boolean
         default: true
 
@@ -3325,6 +3325,25 @@ jobs:
                   refresh();
               }
 
+              // Матовое стекло: полупрозрачная шапка поверх фона (по умолчанию включено)
+              private static volatile int glassState = -1;
+
+              public static boolean glass(Context c) {
+                  int st = glassState;
+                  if (st < 0) {
+                      boolean v = prefs(c).getBoolean("flux_glass", true);
+                      glassState = v ? 1 : 0;
+                      return v;
+                  }
+                  return st == 1;
+              }
+
+              public static void setGlass(Context c, boolean on) {
+                  prefs(c).edit().putBoolean("flux_glass", on).apply();
+                  glassState = on ? 1 : 0;
+                  refresh();
+              }
+
               // Применить изменения: сбросить кэш цветов и сообщить интерфейсу о смене темы
               public static void refresh() {
                   try {
@@ -3555,7 +3574,11 @@ jobs:
                   if (!my) {
                       return null;
                   }
-                  return preview(c, r, dark);
+                  int color = preview(c, r, dark);
+                  if (key == Theme.key_actionBarDefault && glass(c)) {
+                      color = (0xE6 << 24) | (color & 0xFFFFFF);
+                  }
+                  return color;
               }
 
               // Размеры скруглений M3: диалоги 28dp, карточки 16dp, поля 12dp
@@ -3860,6 +3883,17 @@ jobs:
                       }
                   });
                   list.addView(amoled, matchWrap());
+
+                  final TextCheckCell glass = newCell();
+                  glass.setTextAndCheck("Матовое стекло в шапке", FluxFeatures.glass(context), false);
+                  glass.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          FluxFeatures.setGlass(context, !FluxFeatures.glass(context));
+                          rebuildStack();
+                      }
+                  });
+                  list.addView(glass, matchWrap());
 
                   final TextCheckCell badge = newCell();
                   badge.setTextAndCheck("Значок FluxGram рядом с ником", FluxBadge.enabled(), true);
