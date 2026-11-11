@@ -41,7 +41,7 @@ on:
         type: boolean
         default: true
       badge_particles:
-        description: "FluxGram: частицы вокруг значка рядом с ником"
+        description: "FluxGram: частицы вокруг значка по умолчанию (в приложении выключаются в «Темы FluxGram»)"
         type: boolean
         default: true
 
@@ -2447,24 +2447,40 @@ jobs:
               private static final int[] COLORS = {0xFF7FD6FF, 0xFFFFFFFF, 0xFFB388FF, 0xFF8CF0D0};
               private static final int[] COLORS_OFFICIAL = {0xFFFFD54F, 0xFFFFFFFF, 0xFF7FD6FF, 0xFFFFB74D};
 
+              // Состояние частиц общее для всех значков: переключатель в настройках действует сразу, без перезапуска
+              private static volatile int particlesState = -1;
+
+              private final Context appCtx;
               private final Drawable icon;
               private final boolean animated;
               private final boolean official;
-              private final boolean particles;
               private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
               private final Path star = new Path();
               private final Path check = new Path();
               private final int size;
+              private int alpha = 255;
 
               public static boolean particlesEnabled(Context ctx) {
-                  return ctx.getSharedPreferences("fluxgram_prefs", Context.MODE_PRIVATE)
-                          .getBoolean("flux_particles", FLUX_PARTICLES_DEFAULT);
+                  int st = particlesState;
+                  if (st < 0) {
+                      boolean v = ctx.getSharedPreferences("fluxgram_prefs", Context.MODE_PRIVATE)
+                              .getBoolean("flux_particles", FLUX_PARTICLES_DEFAULT);
+                      particlesState = v ? 1 : 0;
+                      return v;
+                  }
+                  return st == 1;
+              }
+
+              public static void setParticlesEnabled(Context ctx, boolean on) {
+                  particlesState = on ? 1 : 0;
+                  ctx.getSharedPreferences("fluxgram_prefs", Context.MODE_PRIVATE).edit().putBoolean("flux_particles", on).apply();
               }
 
               public FluxBadgeDrawable(Context ctx, boolean animated, boolean official) {
+                  Context app = ctx.getApplicationContext();
+                  this.appCtx = app != null ? app : ctx;
                   this.icon = ctx.getResources().getDrawable(R.drawable.flux_badge).mutate();
-                  this.particles = particlesEnabled(ctx);
-                  this.animated = animated && particles;
+                  this.animated = animated;
                   this.official = official;
                   this.size = AndroidUtilities.dp(22);
                   setBounds(0, 0, size, size);
@@ -2472,6 +2488,7 @@ jobs:
 
               @Override
               public void draw(Canvas canvas) {
+                  boolean particles = particlesEnabled(appCtx);
                   Rect b = getBounds();
                   float cx = b.exactCenterX();
                   float cy = b.exactCenterY();
@@ -2485,7 +2502,7 @@ jobs:
                   if (official) {
                       drawCheck(canvas, cx + half * 0.85f, cy + half * 0.85f, s * 0.17f);
                   }
-                  if (animated) {
+                  if (animated && particles) {
                       invalidateSelf();
                   }
               }
@@ -2503,7 +2520,7 @@ jobs:
                       float tw = 0.35f + 0.65f * Math.abs(pulse);
                       paint.setStyle(Paint.Style.FILL);
                       paint.setColor(colors[i % colors.length]);
-                      paint.setAlpha((int) (255 * tw));
+                      paint.setAlpha((int) (alpha * tw));
                       float pr = AndroidUtilities.dpf2(0.7f + 0.5f * (i % 3)) * (0.7f + 0.5f * tw);
                       if (i % 3 == 0) {
                           drawStar(canvas, px, py, pr * 2.2f);
@@ -2516,7 +2533,7 @@ jobs:
               private void drawCheck(Canvas c, float x, float y, float r) {
                   paint.setStyle(Paint.Style.FILL);
                   paint.setColor(0xFF2AABEE);
-                  paint.setAlpha(255);
+                  paint.setAlpha(alpha);
                   c.drawCircle(x, y, r, paint);
                   check.reset();
                   check.moveTo(x - r * 0.45f, y);
@@ -2527,6 +2544,7 @@ jobs:
                   paint.setStrokeJoin(Paint.Join.ROUND);
                   paint.setStrokeWidth(Math.max(1f, r * 0.28f));
                   paint.setColor(0xFFFFFFFF);
+                  paint.setAlpha(alpha);
                   c.drawPath(check, paint);
                   paint.setStyle(Paint.Style.FILL);
               }
@@ -2544,7 +2562,7 @@ jobs:
 
               @Override public int getIntrinsicWidth() { return size; }
               @Override public int getIntrinsicHeight() { return size; }
-              @Override public void setAlpha(int alpha) { icon.setAlpha(alpha); }
+              @Override public void setAlpha(int a) { alpha = a; icon.setAlpha(a); }
               @Override public void setColorFilter(ColorFilter cf) { }
               @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
           }
@@ -2562,29 +2580,69 @@ jobs:
           import android.widget.Toast;
 
           import org.telegram.tgnet.ConnectionsManager;
+          import org.telegram.tgnet.RequestDelegate;
           import org.telegram.tgnet.TLObject;
           import org.telegram.tgnet.TLRPC;
 
           import java.lang.reflect.Field;
           import java.util.ArrayDeque;
+          import java.util.ArrayList;
+          import java.util.HashMap;
           import java.util.HashSet;
+          import java.util.List;
+          import java.util.Map;
           import java.util.Set;
 
           public final class FluxBadge implements NotificationCenter.NotificationCenterDelegate {
 
               // Невидимая метка в конце «О себе»: так друг друга находят пользователи FluxGram
-              public static final String MARK = "\u2060\u200B\u2060";
+              public static final String MARK = "⁠​⁠";
               public static final String OFFICIAL_CHANNEL = "FluxGraam";
+
               private static final String PREFS = "fluxgram_prefs";
               private static final String KNOWN = "flux_known_users";
-              private static boolean inited;
+              private static final String CHECKED = "flux_checked_users";
+
+              // Проверка идёт медленно, чтобы не словить лимиты Telegram: один пользователь в секунду
+              private static final long CHECK_INTERVAL_MS = 1000L;
+              private static final long TTL_FLUX_MS = 7L * 24 * 3600 * 1000;
+              private static final long TTL_PLAIN_MS = 3L * 24 * 3600 * 1000;
+              private static final long RETRY_MS = 10L * 60 * 1000;
+              private static final long MARK_RETRY_MS = 6L * 3600 * 1000;
+              private static final int MAX_QUEUE = 5000;
+              private static final int MAX_CHECKED = 20000;
+
+              private static final Object LOCK = new Object();
               private static final FluxBadge INSTANCE = new FluxBadge();
+
+              // Кто из людей точно пользуется FluxGram
               private static final Set<Long> known = new HashSet<>();
-              private static final Set<Long> asked = new HashSet<>();
-              private static final ArrayDeque<TLRPC.User> queue = new ArrayDeque<>();
-              private static boolean drainScheduled;
+              // Когда пользователя проверяли в последний раз (мс)
+              private static final Map<Long, Long> checked = new HashMap<>();
+              // Когда пытались загрузить профиль в этой сессии (чтобы не долбить сервер повторами)
+              private static final Map<Long, Long> tried = new HashMap<>();
+              private static final ArrayDeque<Job> queue = new ArrayDeque<>();
+              private static final Set<Long> queued = new HashSet<>();
+              private static final boolean[] scanPending = new boolean[UserConfig.MAX_ACCOUNT_COUNT];
+
+              private static boolean inited;
+              private static boolean pumpScheduled;
               private static boolean refreshScheduled;
-              private static int askedTotal;
+              private static boolean saveScheduled;
+
+              private static Field usernamesField;
+              private static Field usernameItemField;
+              private static boolean usernamesLookedUp;
+
+              private static final class Job {
+                  final int account;
+                  final long uid;
+
+                  Job(int account, long uid) {
+                      this.account = account;
+                      this.uid = uid;
+                  }
+              }
 
               // ---------- проверки ----------
 
@@ -2592,35 +2650,104 @@ jobs:
                   return about != null && about.contains(MARK);
               }
 
-              // Свой аккаунт всегда со значком, чужие — по метке в «О себе» или по сохранённому списку
+              // Свой аккаунт всегда со значком, чужие: по метке в «О себе» или по сохранённому списку
               public static boolean isFluxUser(long userId, String about) {
                   init(UserConfig.selectedAccount);
-                  if (isSelf(userId) && enabled()) {
+                  if (!enabled()) {
+                      return false;
+                  }
+                  if (isSelf(userId)) {
                       return true;
                   }
                   if (isFluxUser(about)) {
-                      remember(userId, true);
+                      learn(userId, true);
                       return true;
                   }
-                  synchronized (known) {
+                  synchronized (LOCK) {
                       return known.contains(userId);
                   }
               }
 
               public static boolean isSelf(long userId) {
-                  return userId != 0 && userId == UserConfig.getInstance(UserConfig.selectedAccount).getClientUserId();
+                  if (userId == 0) {
+                      return false;
+                  }
+                  for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+                      UserConfig uc = UserConfig.getInstance(a);
+                      if (uc.isClientActivated() && uc.getClientUserId() == userId) {
+                          return true;
+                      }
+                  }
+                  return false;
               }
 
               public static boolean isOfficialChannel(TLRPC.Chat chat) {
-                  return chat != null && chat.username != null && chat.username.equalsIgnoreCase(OFFICIAL_CHANNEL);
+                  if (chat == null) {
+                      return false;
+                  }
+                  if (chat.username != null && chat.username.equalsIgnoreCase(OFFICIAL_CHANNEL)) {
+                      return true;
+                  }
+                  // У каналов с несколькими именами публичный адрес лежит в списке usernames
+                  try {
+                      synchronized (LOCK) {
+                          if (!usernamesLookedUp) {
+                              usernamesLookedUp = true;
+                              try {
+                                  usernamesField = TLRPC.Chat.class.getField("usernames");
+                              } catch (Throwable ignore) {
+                                  usernamesField = null;
+                              }
+                          }
+                      }
+                      if (usernamesField != null) {
+                          Object list = usernamesField.get(chat);
+                          if (list instanceof List) {
+                              for (Object o : (List<?>) list) {
+                                  if (o == null) {
+                                      continue;
+                                  }
+                                  Field f = usernameItemField;
+                                  if (f == null) {
+                                      f = o.getClass().getField("username");
+                                      usernameItemField = f;
+                                  }
+                                  Object v = f.get(o);
+                                  if (v instanceof String && ((String) v).equalsIgnoreCase(OFFICIAL_CHANNEL)) {
+                                      return true;
+                                  }
+                              }
+                          }
+                      }
+                  } catch (Throwable ignore) {
+                      // нет такого поля в этой версии Telegram
+                  }
+                  return false;
               }
 
               public static boolean enabled() {
                   return prefs().getBoolean("flux_badge", true);
               }
 
+              // Включить или выключить значок. Выключенный значок не рисуется нигде, проверка людей приостанавливается
+              public static void setEnabled(boolean on) {
+                  prefs().edit().putBoolean("flux_badge", on).apply();
+                  if (on) {
+                      for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+                          if (UserConfig.getInstance(a).isClientActivated()) {
+                              scheduleScan(a);
+                          }
+                      }
+                  }
+                  scheduleRefresh();
+              }
+
               private static SharedPreferences prefs() {
                   return ApplicationLoader.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+              }
+
+              private static long now() {
+                  return System.currentTimeMillis();
               }
 
               // ---------- значки ----------
@@ -2644,29 +2771,34 @@ jobs:
               }
 
               public static CharSequence append(Context ctx, CharSequence name, boolean official) {
-                  SpannableStringBuilder sb = new SpannableStringBuilder(name).append(" \uFFFC");
+                  SpannableStringBuilder sb = new SpannableStringBuilder(name).append(" ￼");
                   Drawable d = new FluxBadgeDrawable(ctx, false, official);
                   sb.setSpan(new ImageSpan(d, ImageSpan.ALIGN_BASELINE),
                           sb.length() - 1, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                   return sb;
               }
 
-              // Имя пользователя + значок (для списков и шапки чата)
+              // Имя пользователя + значок (для списков и шапки личного чата)
               public static CharSequence wrapUser(Context ctx, CharSequence name, TLRPC.User user) {
                   if (name == null || user == null) {
                       return name;
                   }
                   init(UserConfig.selectedAccount);
+                  if (!enabled()) {
+                      return name;
+                  }
                   if (isSelf(user.id)) {
-                      return enabled() ? append(ctx, name, false) : name;
+                      return append(ctx, name, false);
                   }
                   boolean flux;
-                  synchronized (known) {
+                  synchronized (LOCK) {
                       flux = known.contains(user.id);
                   }
                   if (!flux) {
-                      // Профиль ещё не проверяли: ставим в очередь на тихую загрузку «О себе»
-                      check(user);
+                      // Пользователя ещё не проверяли: ставим в начало очереди на тихую проверку «О себе»
+                      if (!user.bot && !user.deleted) {
+                          enqueue(UserConfig.selectedAccount, user.id, true);
+                      }
                       return name;
                   }
                   return append(ctx, name, false);
@@ -2682,92 +2814,287 @@ jobs:
 
               // ---------- обнаружение других пользователей FluxGram ----------
 
-              private static void remember(long uid, boolean flux) {
+              // Запомнить результат проверки. flux = у человека найдена метка
+              private static void learn(long uid, boolean flux) {
                   boolean changed;
-                  synchronized (known) {
+                  synchronized (LOCK) {
                       changed = flux ? known.add(uid) : known.remove(uid);
-                      if (changed) {
-                          java.util.HashSet<String> out = new java.util.HashSet<>();
-                          for (Long l : known) {
-                              out.add(String.valueOf(l));
-                          }
-                          prefs().edit().putStringSet(KNOWN, out).apply();
-                      }
+                      checked.put(uid, now());
+                      tried.remove(uid);
                   }
+                  scheduleSave();
                   if (changed) {
                       scheduleRefresh();
                   }
               }
 
-              private static void check(TLRPC.User user) {
-                  if (user.bot || user.deleted || asked.contains(user.id) || askedTotal > 400) {
-                      return;
-                  }
-                  asked.add(user.id);
-                  askedTotal++;
-                  queue.add(user);
-                  if (!drainScheduled) {
-                      drainScheduled = true;
-                      AndroidUtilities.runOnUIThread(DRAIN, 900);
+              private static boolean needsCheck(long uid, long t) {
+                  synchronized (LOCK) {
+                      Long last = checked.get(uid);
+                      long ttl = known.contains(uid) ? TTL_FLUX_MS : TTL_PLAIN_MS;
+                      if (last != null && t - last < ttl) {
+                          return false;
+                      }
+                      Long tr = tried.get(uid);
+                      return tr == null || t - tr > RETRY_MS;
                   }
               }
 
-              private static final Runnable DRAIN = new Runnable() {
+              private static void enqueue(int account, long uid, boolean front) {
+                  if (uid <= 0 || isSelf(uid)) {
+                      return;
+                  }
+                  synchronized (LOCK) {
+                      if (queued.contains(uid) || queue.size() >= MAX_QUEUE || !needsCheck(uid, now())) {
+                          return;
+                      }
+                      queued.add(uid);
+                      if (front) {
+                          queue.addFirst(new Job(account, uid));
+                      } else {
+                          queue.addLast(new Job(account, uid));
+                      }
+                  }
+                  schedulePump(CHECK_INTERVAL_MS);
+              }
+
+              private static void schedulePump(long delay) {
+                  synchronized (LOCK) {
+                      if (pumpScheduled) {
+                          return;
+                      }
+                      pumpScheduled = true;
+                  }
+                  AndroidUtilities.runOnUIThread(PUMP, delay);
+              }
+
+              private static final Runnable PUMP = new Runnable() {
                   @Override
                   public void run() {
-                      drainScheduled = false;
-                      TLRPC.User u = queue.poll();
-                      if (u != null) {
-                          try {
-                              MessagesController.getInstance(UserConfig.selectedAccount).loadFullUser(u, 0, false);
-                          } catch (Throwable t) {
-                              FileLog.e(t);
-                          }
+                      synchronized (LOCK) {
+                          pumpScheduled = false;
                       }
-                      if (!queue.isEmpty()) {
-                          drainScheduled = true;
-                          AndroidUtilities.runOnUIThread(this, 900);
+                      try {
+                          pumpOnce();
+                      } catch (Throwable t) {
+                          FileLog.e(t);
+                      }
+                      boolean more;
+                      synchronized (LOCK) {
+                          more = !queue.isEmpty();
+                      }
+                      if (more) {
+                          schedulePump(CHECK_INTERVAL_MS);
                       }
                   }
               };
 
-              private static void scheduleRefresh() {
-                  if (refreshScheduled) {
+              // За один «тик» делает не больше одного сетевого запроса. Профили, которые уже в памяти, обрабатываются сразу
+              private static void pumpOnce() {
+                  for (int guard = 0; guard < 300; guard++) {
+                      Job j;
+                      synchronized (LOCK) {
+                          if (!enabled()) {
+                              queue.clear();
+                              queued.clear();
+                              return;
+                          }
+                          j = queue.pollFirst();
+                          if (j == null) {
+                              return;
+                          }
+                          queued.remove(j.uid);
+                      }
+                      if (!needsCheck(j.uid, now())) {
+                          continue;
+                      }
+                      MessagesController mc = MessagesController.getInstance(j.account);
+                      TLRPC.User u = mc.getUser(j.uid);
+                      if (u == null || u.bot || u.deleted) {
+                          continue;
+                      }
+                      TLRPC.UserFull full = mc.getUserFull(j.uid);
+                      if (full != null) {
+                          learn(j.uid, isFluxUser(full.about));
+                          continue;
+                      }
+                      synchronized (LOCK) {
+                          tried.put(j.uid, now());
+                      }
+                      // Ответ придёт в didReceivedNotification (userInfoDidLoad)
+                      mc.loadFullUser(u, 0, true);
                       return;
                   }
-                  refreshScheduled = true;
-                  AndroidUtilities.runOnUIThread(() -> {
-                      refreshScheduled = false;
-                      try {
-                          NotificationCenter.getInstance(UserConfig.selectedAccount).postNotificationName(
-                                  NotificationCenter.updateInterfaces, MessagesController.UPDATE_MASK_NAME);
-                      } catch (Throwable t) {
-                          FileLog.e(t);
+              }
+
+              // Просмотр списков: сначала собеседники из диалогов, потом контакты
+              private static void scan(int account) {
+                  if (!enabled()) {
+                      return;
+                  }
+                  UserConfig uc = UserConfig.getInstance(account);
+                  if (!uc.isClientActivated()) {
+                      return;
+                  }
+                  try {
+                      ArrayList<TLRPC.Dialog> dialogs = new ArrayList<>(MessagesController.getInstance(account).getAllDialogs());
+                      for (TLRPC.Dialog d : dialogs) {
+                          if (d != null && DialogObject.isUserDialog(d.id)) {
+                              enqueue(account, d.id, false);
+                          }
+                      }
+                  } catch (Throwable t) {
+                      FileLog.e(t);
+                  }
+                  try {
+                      ArrayList<TLRPC.TL_contact> contacts = new ArrayList<>(ContactsController.getInstance(account).contacts);
+                      for (TLRPC.TL_contact c : contacts) {
+                          if (c != null) {
+                              enqueue(account, c.user_id, false);
+                          }
+                      }
+                  } catch (Throwable t) {
+                      FileLog.e(t);
+                  }
+              }
+
+              private static void scheduleScan(final int account) {
+                  if (account < 0 || account >= scanPending.length) {
+                      return;
+                  }
+                  synchronized (LOCK) {
+                      if (scanPending[account]) {
+                          return;
+                      }
+                      scanPending[account] = true;
+                  }
+                  AndroidUtilities.runOnUIThread(new Runnable() {
+                      @Override
+                      public void run() {
+                          synchronized (LOCK) {
+                              scanPending[account] = false;
+                          }
+                          try {
+                              ensureSelf(account);
+                              scan(account);
+                          } catch (Throwable t) {
+                              FileLog.e(t);
+                          }
+                      }
+                  }, 3000);
+              }
+
+              private static void scheduleRefresh() {
+                  synchronized (LOCK) {
+                      if (refreshScheduled) {
+                          return;
+                      }
+                      refreshScheduled = true;
+                  }
+                  AndroidUtilities.runOnUIThread(new Runnable() {
+                      @Override
+                      public void run() {
+                          synchronized (LOCK) {
+                              refreshScheduled = false;
+                          }
+                          try {
+                              NotificationCenter.getInstance(UserConfig.selectedAccount).postNotificationName(
+                                      NotificationCenter.updateInterfaces, MessagesController.UPDATE_MASK_NAME);
+                          } catch (Throwable t) {
+                              FileLog.e(t);
+                          }
                       }
                   }, 500);
               }
 
-              // ---------- метка в собственном профиле ----------
+              // ---------- сохранение между запусками ----------
 
-              public static void init(int account) {
-                  if (inited) {
-                      return;
+              private static void scheduleSave() {
+                  synchronized (LOCK) {
+                      if (saveScheduled) {
+                          return;
+                      }
+                      saveScheduled = true;
                   }
-                  inited = true;
+                  AndroidUtilities.runOnUIThread(new Runnable() {
+                      @Override
+                      public void run() {
+                          HashSet<String> k = new HashSet<>();
+                          HashSet<String> c = new HashSet<>();
+                          synchronized (LOCK) {
+                              saveScheduled = false;
+                              for (Long l : known) {
+                                  k.add(String.valueOf(l));
+                              }
+                              for (Map.Entry<Long, Long> e : checked.entrySet()) {
+                                  if (c.size() >= MAX_CHECKED) {
+                                      break;
+                                  }
+                                  c.add(e.getKey() + ":" + e.getValue());
+                              }
+                          }
+                          try {
+                              prefs().edit().putStringSet(KNOWN, k).putStringSet(CHECKED, c).apply();
+                          } catch (Throwable t) {
+                              FileLog.e(t);
+                          }
+                      }
+                  }, 4000);
+              }
+
+              private static void load() {
                   try {
-                      Set<String> saved = prefs().getStringSet(KNOWN, null);
-                      if (saved != null) {
-                          synchronized (known) {
-                              for (String s : saved) {
-                                  known.add(Long.parseLong(s));
+                      Set<String> savedKnown = prefs().getStringSet(KNOWN, null);
+                      Set<String> savedChecked = prefs().getStringSet(CHECKED, null);
+                      synchronized (LOCK) {
+                          if (savedKnown != null) {
+                              for (String s : savedKnown) {
+                                  try {
+                                      known.add(Long.parseLong(s));
+                                  } catch (NumberFormatException ignore) { }
+                              }
+                          }
+                          if (savedChecked != null) {
+                              for (String s : savedChecked) {
+                                  int i = s.indexOf(':');
+                                  if (i > 0) {
+                                      try {
+                                          checked.put(Long.parseLong(s.substring(0, i)), Long.parseLong(s.substring(i + 1)));
+                                      } catch (NumberFormatException ignore) { }
+                                  }
                               }
                           }
                       }
                   } catch (Throwable t) {
                       FileLog.e(t);
                   }
+              }
+
+              // ---------- запуск и метка в собственном профиле ----------
+
+              // Вызывается при старте приложения (хук в ApplicationLoader) и лениво из интерфейса. Повторные вызовы безопасны
+              public static void init(int account) {
+                  synchronized (LOCK) {
+                      if (inited) {
+                          return;
+                      }
+                      inited = true;
+                  }
+                  if (ApplicationLoader.applicationContext == null) {
+                      synchronized (LOCK) {
+                          inited = false;
+                      }
+                      return;
+                  }
+                  load();
                   for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
-                      NotificationCenter.getInstance(a).addObserver(INSTANCE, NotificationCenter.userInfoDidLoad);
+                      NotificationCenter nc = NotificationCenter.getInstance(a);
+                      nc.addObserver(INSTANCE, NotificationCenter.userInfoDidLoad);
+                      nc.addObserver(INSTANCE, NotificationCenter.contactsDidLoad);
+                      nc.addObserver(INSTANCE, NotificationCenter.dialogsNeedReload);
+                      if (UserConfig.getInstance(a).isClientActivated()) {
+                          scheduleScan(a);
+                      }
                   }
                   ensureSelf(account);
               }
@@ -2788,7 +3115,8 @@ jobs:
                   }
               }
 
-              private static void apply(int account, String about) {
+              // Дописывает невидимую метку в «О себе». Не чаще раза в 6 часов, чтобы не зациклиться, если сервер её уберёт
+              private static void apply(final int account, String about) {
                   if (!enabled()) {
                       return;
                   }
@@ -2796,11 +3124,19 @@ jobs:
                   if (isFluxUser(base)) {
                       return;
                   }
-                  int max = UserConfig.getInstance(account).isPremium() ? 140 : 70;
+                  UserConfig uc = UserConfig.getInstance(account);
+                  final long uid = uc.getClientUserId();
+                  String key = "flux_mark_try_" + uid;
+                  long t = now();
+                  if (t - prefs().getLong(key, 0L) < MARK_RETRY_MS) {
+                      return;
+                  }
+                  int max = uc.isPremium() ? 140 : 70;
                   // Чужой текст не обрезаем: если «О себе» заполнено под завязку, метку не ставим
                   if (base.length() + MARK.length() > max) {
                       return;
                   }
+                  final String newAbout = base + MARK;
                   try {
                       Class<?> cls;
                       try {
@@ -2810,27 +3146,56 @@ jobs:
                       }
                       TLObject req = (TLObject) cls.getDeclaredConstructor().newInstance();
                       Field fAbout = cls.getField("about");
-                      fAbout.set(req, base + MARK);
+                      fAbout.set(req, newAbout);
                       Field fFlags = cls.getField("flags");
                       fFlags.setInt(req, fFlags.getInt(req) | 4);
-                      ConnectionsManager.getInstance(account).sendRequest(req, null);
-                  } catch (Throwable t) {
-                      FileLog.e(t);
+                      prefs().edit().putLong(key, t).apply();
+                      ConnectionsManager.getInstance(account).sendRequest(req, new RequestDelegate() {
+                          @Override
+                          public void run(final TLObject response, final TLRPC.TL_error error) {
+                              if (error != null) {
+                                  FileLog.e("FluxBadge: метка не записана: " + error.text);
+                                  return;
+                              }
+                              AndroidUtilities.runOnUIThread(new Runnable() {
+                                  @Override
+                                  public void run() {
+                                      try {
+                                          MessagesController mc = MessagesController.getInstance(account);
+                                          if (response instanceof TLRPC.User) {
+                                              mc.putUser((TLRPC.User) response, false);
+                                          }
+                                          TLRPC.UserFull f = mc.getUserFull(uid);
+                                          if (f != null) {
+                                              f.about = newAbout;
+                                          }
+                                      } catch (Throwable e) {
+                                          FileLog.e(e);
+                                      }
+                                  }
+                              });
+                          }
+                      });
+                  } catch (Throwable e) {
+                      FileLog.e(e);
                   }
               }
 
               @Override
               public void didReceivedNotification(int id, int account, Object... args) {
-                  if (id != NotificationCenter.userInfoDidLoad || args == null || args.length < 2
-                          || !(args[0] instanceof Long) || !(args[1] instanceof TLRPC.UserFull)) {
-                      return;
-                  }
-                  long uid = (Long) args[0];
-                  String about = ((TLRPC.UserFull) args[1]).about;
-                  if (uid == UserConfig.getInstance(account).getClientUserId()) {
-                      apply(account, about);
-                  } else {
-                      remember(uid, isFluxUser(about));
+                  if (id == NotificationCenter.userInfoDidLoad) {
+                      if (args == null || args.length < 2 || !(args[0] instanceof Long) || !(args[1] instanceof TLRPC.UserFull)) {
+                          return;
+                      }
+                      long uid = (Long) args[0];
+                      String about = ((TLRPC.UserFull) args[1]).about;
+                      if (uid == UserConfig.getInstance(account).getClientUserId()) {
+                          apply(account, about);
+                      } else {
+                          learn(uid, isFluxUser(about));
+                      }
+                  } else if (id == NotificationCenter.contactsDidLoad || id == NotificationCenter.dialogsNeedReload) {
+                      scheduleScan(account);
                   }
               }
           }
@@ -2848,6 +3213,7 @@ jobs:
           import org.telegram.ui.ActionBar.Theme;
 
           import java.lang.reflect.Field;
+          import java.lang.reflect.Method;
 
           public final class FluxFeatures {
 
@@ -2881,37 +3247,61 @@ jobs:
                   }
               }
 
-              private static Boolean materialYouCache;
+              // Настройки лежат в кэше: override() вызывается на каждый запрос цвета, читать prefs каждый раз нельзя
+              private static volatile int myState = -1;
+              private static volatile int hueState = Integer.MIN_VALUE;
+              private static volatile int satState = -1;
+              private static volatile int amoledState = -1;
               private static SparseArray<Role> map;
+              private static final ThreadLocal<Boolean> BUSY = new ThreadLocal<>();
+              private static Method darkMethod;
+              private static boolean darkLookedUp;
 
               private static SharedPreferences prefs(Context c) {
                   return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
               }
 
               public static boolean isMaterialYou(Context c) {
-                  if (materialYouCache == null) {
-                      materialYouCache = prefs(c).getBoolean("material_you", FLUX_MY_DEFAULT);
+                  int st = myState;
+                  if (st < 0) {
+                      boolean v = prefs(c).getBoolean("material_you", FLUX_MY_DEFAULT);
+                      myState = v ? 1 : 0;
+                      return v;
                   }
-                  return materialYouCache;
+                  return st == 1;
               }
 
               public static void setMaterialYou(Context c, boolean on) {
                   prefs(c).edit().putBoolean("material_you", on).apply();
-                  materialYouCache = on;
+                  myState = on ? 1 : 0;
                   refresh();
               }
 
               // Выбранный оттенок: -1 = системные динамические цвета (обои), 0..360 = палитра из оттенка
               public static int seedHue(Context c) {
-                  return prefs(c).getInt("flux_seed_hue", -1);
+                  int v = hueState;
+                  if (v == Integer.MIN_VALUE) {
+                      v = prefs(c).getInt("flux_seed_hue", -1);
+                      hueState = v;
+                  }
+                  return v;
               }
 
               public static int seedSat(Context c) {
-                  return prefs(c).getInt("flux_seed_sat", 48);
+                  int v = satState;
+                  if (v < 0) {
+                      v = prefs(c).getInt("flux_seed_sat", 48);
+                      satState = v;
+                  }
+                  return v;
               }
 
+              // Выбор палитры сразу включает Material You, иначе выбранные цвета нигде не применились бы
               public static void setSeedQuiet(Context c, int hue, int sat) {
-                  prefs(c).edit().putInt("flux_seed_hue", hue).putInt("flux_seed_sat", sat).apply();
+                  prefs(c).edit().putInt("flux_seed_hue", hue).putInt("flux_seed_sat", sat).putBoolean("material_you", true).apply();
+                  hueState = hue;
+                  satState = sat;
+                  myState = 1;
               }
 
               public static void setSeed(Context c, int hue, int sat) {
@@ -2920,20 +3310,27 @@ jobs:
               }
 
               public static boolean amoled(Context c) {
-                  return prefs(c).getBoolean("flux_amoled", false);
+                  int st = amoledState;
+                  if (st < 0) {
+                      boolean v = prefs(c).getBoolean("flux_amoled", false);
+                      amoledState = v ? 1 : 0;
+                      return v;
+                  }
+                  return st == 1;
               }
 
               public static void setAmoled(Context c, boolean on) {
                   prefs(c).edit().putBoolean("flux_amoled", on).apply();
+                  amoledState = on ? 1 : 0;
                   refresh();
               }
 
-              // Применить изменения: сбросить цвета и сообщить интерфейсу о смене темы
+              // Применить изменения: сбросить кэш цветов и сообщить интерфейсу о смене темы
               public static void refresh() {
                   try {
-                      Theme.invalidateTheme();
-                  } catch (Throwable t) {
-                      FileLog.e(t);
+                      Theme.class.getMethod("invalidateTheme").invoke(null);
+                  } catch (Throwable ignore) {
+                      // метода нет в этой версии: достаточно уведомления ниже
                   }
                   try {
                       NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.didSetNewTheme, false);
@@ -2942,16 +3339,50 @@ jobs:
                   }
               }
 
-              public static boolean isDark(Context c) {
+              private static boolean systemDark(Context c) {
                   int mode = c.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
                   return mode == Configuration.UI_MODE_NIGHT_YES;
+              }
+
+              private static synchronized Method darkMethod() {
+                  if (!darkLookedUp) {
+                      darkLookedUp = true;
+                      try {
+                          darkMethod = Theme.class.getMethod("isCurrentThemeDark");
+                      } catch (Throwable ignore) {
+                          darkMethod = null;
+                      }
+                  }
+                  return darkMethod;
+              }
+
+              // Тёмная ли сейчас тема Telegram (она может отличаться от системной). Если не узнать, берём системную
+              public static boolean isDark(Context c) {
+                  if (Boolean.TRUE.equals(BUSY.get())) {
+                      return systemDark(c);
+                  }
+                  BUSY.set(Boolean.TRUE);
+                  try {
+                      Method m = darkMethod();
+                      if (m != null) {
+                          Object r = m.invoke(null);
+                          if (r instanceof Boolean) {
+                              return (Boolean) r;
+                          }
+                      }
+                  } catch (Throwable ignore) {
+                      // тема ещё не загружена
+                  } finally {
+                      BUSY.set(Boolean.FALSE);
+                  }
+                  return systemDark(c);
               }
 
               private static boolean systemColors(Context c) {
                   return seedHue(c) < 0;
               }
 
-              // Цвет роли для текущей темы. fallback — если Material You выключен
+              // Цвет роли для текущей темы. fallback: если Material You выключен
               public static int role(Context c, Role role, int fallback) {
                   if (!isMaterialYou(c)) {
                       return fallback;
@@ -2966,6 +3397,12 @@ jobs:
               public static int preview(Context c, Role role, boolean dark) {
                   int hue = seedHue(c);
                   if (hue < 0) {
+                      if (dark && amoled(c)) {
+                          Integer a = amoledSurface(role);
+                          if (a != null) {
+                              return a;
+                          }
+                      }
                       if (Build.VERSION.SDK_INT >= 31) {
                           return c.getResources().getColor(dark ? role.dark : role.light, c.getTheme());
                       }
@@ -3005,6 +3442,17 @@ jobs:
                   }
               }
 
+              // Чёрные поверхности для AMOLED (когда палитра системная или Material You выключен)
+              private static Integer amoledSurface(Role r) {
+                  switch (r) {
+                      case SURFACE: return 0xFF000000;
+                      case SURFACE_CONTAINER: return 0xFF0B0B0B;
+                      case SURFACE_CONTAINER_HIGH: return 0xFF181818;
+                      case SURFACE_VARIANT: return 0xFF111111;
+                      default: return null;
+                  }
+              }
+
               private static int hsl(float h, float s, float l) {
                   h = ((h % 360f) + 360f) % 360f;
                   float c = (1f - Math.abs(2f * l - 1f)) * s;
@@ -3028,7 +3476,7 @@ jobs:
                               map.put(f.getInt(null), role);
                           }
                       } catch (Throwable ignore) {
-                          // такого ключа нет в этой версии Telegram — пропускаем
+                          // такого ключа нет в этой версии Telegram: пропускаем
                       }
                   }
               }
@@ -3080,20 +3528,34 @@ jobs:
                   return map;
               }
 
-              // Переопределение цвета ключа Telegram. null = не трогаем
+              // Переопределение цвета ключа Telegram. null = не трогаем.
+              // Свои оттенки работают на любой версии Android; «системные» только на Android 12+.
+              // AMOLED работает отдельно от Material You и с любой палитрой
               public static Integer override(int key) {
                   Context c = ApplicationLoader.applicationContext;
-                  if (c == null || !isMaterialYou(c)) {
-                      return null;
-                  }
-                  if (systemColors(c) && Build.VERSION.SDK_INT < 31) {
+                  if (c == null) {
                       return null;
                   }
                   Role r = table().get(key);
                   if (r == null) {
                       return null;
                   }
-                  return role(c, r, 0);
+                  boolean my = isMaterialYou(c) && !(seedHue(c) < 0 && Build.VERSION.SDK_INT < 31);
+                  boolean am = amoled(c);
+                  if (!my && !am) {
+                      return null;
+                  }
+                  boolean dark = isDark(c);
+                  if (am && dark) {
+                      Integer a = amoledSurface(r);
+                      if (a != null && (!my || seedHue(c) < 0)) {
+                          return a;
+                      }
+                  }
+                  if (!my) {
+                      return null;
+                  }
+                  return preview(c, r, dark);
               }
 
               // Размеры скруглений M3: диалоги 28dp, карточки 16dp, поля 12dp
@@ -3135,8 +3597,11 @@ jobs:
           import android.widget.TextView;
 
           import org.telegram.messenger.AndroidUtilities;
+          import org.telegram.messenger.FluxBadge;
+          import org.telegram.messenger.FluxBadgeDrawable;
           import org.telegram.messenger.FluxFeatures;
           import org.telegram.messenger.FluxFeatures.Role;
+          import org.telegram.messenger.NotificationCenter;
           import org.telegram.messenger.R;
           import org.telegram.ui.ActionBar.ActionBar;
           import org.telegram.ui.ActionBar.BaseFragment;
@@ -3148,18 +3613,69 @@ jobs:
           import java.util.Random;
 
           // Темы FluxGram: динамические цвета Material You 3, свои оттенки, AMOLED и живое превью
-          public class FluxThemesActivity extends BaseFragment {
+          public class FluxThemesActivity extends BaseFragment implements NotificationCenter.NotificationCenterDelegate {
 
               private static final String[] NAMES = {"Системные", "Океан", "Закат", "Лес", "Лаванда", "Роза", "Янтарь", "Бирюза", "Графит"};
               private static final int[] HUES = {-1, 205, 18, 135, 265, 335, 42, 175, 215};
               private static final int[] SATS = {48, 52, 62, 42, 50, 56, 72, 50, 7};
 
               private Context ctx;
+              private FrameLayout root;
+              private ScrollView scroll;
+              private LinearLayout list;
               private PreviewView preview;
+              private BadgePreview badgePreview;
+              private TextView dice;
               private final ArrayList<Swatch> swatches = new ArrayList<>();
               private SeekBar hueBar;
               private SeekBar satBar;
               private TextView hueLabel;
+
+              @Override
+              public boolean onFragmentCreate() {
+                  NotificationCenter.getGlobalInstance().addObserver(this, NotificationCenter.didSetNewTheme);
+                  return super.onFragmentCreate();
+              }
+
+              @Override
+              public void onFragmentDestroy() {
+                  NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.didSetNewTheme);
+                  super.onFragmentDestroy();
+              }
+
+              private boolean rebuildPosted;
+
+              // Тема поменялась (в том числе нами): перекрашиваем свой экран, пересобрав содержимое.
+              // Делаем это отложенно, чтобы не удалять ползунок прямо во время его события
+              @Override
+              public void didReceivedNotification(int id, int account, Object... args) {
+                  if (id == NotificationCenter.didSetNewTheme && !rebuildPosted) {
+                      rebuildPosted = true;
+                      AndroidUtilities.runOnUIThread(new Runnable() {
+                          @Override
+                          public void run() {
+                              rebuildPosted = false;
+                              rebuildSelf();
+                          }
+                      });
+                  }
+              }
+
+              private void rebuildSelf() {
+                  if (list == null || scroll == null || fragmentView == null) {
+                      return;
+                  }
+                  applyChrome();
+                  final int y = scroll.getScrollY();
+                  list.removeAllViews();
+                  buildContent();
+                  scroll.post(new Runnable() {
+                      @Override
+                      public void run() {
+                          scroll.scrollTo(0, y);
+                      }
+                  });
+              }
 
               @Override
               public View createView(Context context) {
@@ -3176,35 +3692,64 @@ jobs:
                       }
                   });
 
-                  FrameLayout root = new FrameLayout(context);
-                  root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
+                  root = new FrameLayout(context);
                   fragmentView = root;
-
-                  ScrollView scroll = new ScrollView(context);
+                  scroll = new ScrollView(context);
                   root.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-                  LinearLayout list = new LinearLayout(context);
+                  list = new LinearLayout(context);
                   list.setOrientation(LinearLayout.VERTICAL);
                   scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+                  applyChrome();
+                  buildContent();
+                  return fragmentView;
+              }
+
+              private void applyChrome() {
+                  root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
+                  actionBar.setBackgroundColor(Theme.getColor(Theme.key_actionBarDefault));
+                  actionBar.setTitleColor(Theme.getColor(Theme.key_actionBarDefaultTitle));
+                  actionBar.setItemsColor(Theme.getColor(Theme.key_actionBarDefaultIcon), false);
+              }
+
+              // Остальные открытые экраны (настройки, список чатов) берут новые цвета при пересоздании. Текущий не трогаем
+              private void rebuildStack() {
+                  try {
+                      Object layout = parentLayout;
+                      if (layout != null) {
+                          layout.getClass().getMethod("rebuildAllFragmentViews", boolean.class, boolean.class)
+                                  .invoke(layout, false, false);
+                      }
+                  } catch (Throwable ignore) {
+                      // старые экраны перекрасятся при следующем открытии приложения
+                  }
+              }
+
+              private void buildContent() {
+                  final Context context = ctx;
+                  swatches.clear();
+
                   // --- превью: светлая и тёмная тема рядом
-                  addHeader(list, "Предпросмотр");
+                  addHeader("Предпросмотр");
                   preview = new PreviewView(context);
                   list.addView(preview, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, AndroidUtilities.dp(210)));
 
                   // --- включатель
-                  TextCheckCell my = newCell();
+                  final TextCheckCell my = newCell();
                   my.setTextAndCheck("Динамические цвета Material You 3", FluxFeatures.isMaterialYou(context), false);
-                  my.setOnClickListener(v -> {
-                      boolean on = !FluxFeatures.isMaterialYou(context);
-                      FluxFeatures.setMaterialYou(context, on);
-                      my.setChecked(on);
-                      preview.invalidate();
+                  my.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          boolean on = !FluxFeatures.isMaterialYou(context);
+                          FluxFeatures.setMaterialYou(context, on);
+                          rebuildStack();
+                      }
                   });
                   list.addView(my, matchWrap());
-                  addNote(list, "Цвета приложения берутся из вашей палитры. «Системные» подхватывают обои (Android 12+), остальные работают на любой версии Android.");
+                  addNote("Цвета приложения берутся из вашей палитры. «Системные» подхватывают обои (Android 12+), остальные работают на любой версии Android.");
 
                   // --- палитры
-                  addHeader(list, "Палитра");
+                  addHeader("Палитра");
                   HorizontalScrollView hs = new HorizontalScrollView(context);
                   hs.setHorizontalScrollBarEnabled(false);
                   hs.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
@@ -3222,7 +3767,12 @@ jobs:
                       cellBox.setGravity(Gravity.CENTER_HORIZONTAL);
                       cellBox.setPadding(AndroidUtilities.dp(6), 0, AndroidUtilities.dp(6), 0);
                       Swatch sw = new Swatch(context, hue, sat);
-                      sw.setOnClickListener(v -> choose(hue, sat));
+                      sw.setOnClickListener(new View.OnClickListener() {
+                          @Override
+                          public void onClick(View v) {
+                              choose(hue, sat);
+                          }
+                      });
                       swatches.add(sw);
                       cellBox.addView(sw, new LinearLayout.LayoutParams(AndroidUtilities.dp(56), AndroidUtilities.dp(56)));
                       TextView label = new TextView(context);
@@ -3237,7 +3787,7 @@ jobs:
                   list.addView(hs, matchWrap());
 
                   // --- свой оттенок
-                  addHeader(list, "Свой оттенок");
+                  addHeader("Свой оттенок");
                   LinearLayout sliders = new LinearLayout(context);
                   sliders.setOrientation(LinearLayout.VERTICAL);
                   sliders.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
@@ -3260,6 +3810,7 @@ jobs:
                   sliders.addView(satBar, matchWrap());
                   list.addView(sliders, matchWrap());
 
+                  // ползунки только запоминают значение и обновляют превью; цвета приложения меняются, когда отпустили палец
                   SeekBar.OnSeekBarChangeListener l = new SeekBar.OnSeekBarChangeListener() {
                       @Override
                       public void onProgressChanged(SeekBar bar, int p, boolean fromUser) {
@@ -3267,7 +3818,7 @@ jobs:
                               return;
                           }
                           FluxFeatures.setSeedQuiet(ctx, hueBar.getProgress(), Math.max(4, satBar.getProgress()));
-                          updateUi();
+                          updateUi(false);
                       }
 
                       @Override public void onStartTrackingTouch(SeekBar bar) { }
@@ -3275,88 +3826,114 @@ jobs:
                       @Override
                       public void onStopTrackingTouch(SeekBar bar) {
                           FluxFeatures.refresh();
+                          rebuildStack();
                       }
                   };
                   hueBar.setOnSeekBarChangeListener(l);
                   satBar.setOnSeekBarChangeListener(l);
 
                   // --- кубик
-                  TextView dice = new TextView(context);
+                  dice = new TextView(context);
                   dice.setText("🎲  Случайная палитра");
                   dice.setTextSize(16);
                   dice.setGravity(Gravity.CENTER);
-                  dice.setOnClickListener(v -> {
-                      Random rnd = new Random();
-                      choose(rnd.nextInt(360), 40 + rnd.nextInt(35));
+                  dice.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          Random rnd = new Random();
+                          choose(rnd.nextInt(360), 40 + rnd.nextInt(35));
+                      }
                   });
                   LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, AndroidUtilities.dp(52));
                   dlp.setMargins(AndroidUtilities.dp(16), AndroidUtilities.dp(14), AndroidUtilities.dp(16), AndroidUtilities.dp(6));
                   list.addView(dice, dlp);
-                  styleDice(dice);
 
-                  // --- дополнительно
-                  addHeader(list, "Оформление");
-                  TextCheckCell amoled = newCell();
+                  // --- оформление
+                  addHeader("Оформление");
+                  final TextCheckCell amoled = newCell();
                   amoled.setTextAndCheck("Чёрный AMOLED фон в тёмной теме", FluxFeatures.amoled(context), true);
-                  amoled.setOnClickListener(v -> {
-                      boolean on = !FluxFeatures.amoled(context);
-                      FluxFeatures.setAmoled(context, on);
-                      amoled.setChecked(on);
-                      preview.invalidate();
+                  amoled.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          FluxFeatures.setAmoled(context, !FluxFeatures.amoled(context));
+                          rebuildStack();
+                      }
                   });
                   list.addView(amoled, matchWrap());
 
-                  final android.content.SharedPreferences sp = context.getSharedPreferences("fluxgram_prefs", Context.MODE_PRIVATE);
-                  TextCheckCell badge = newCell();
-                  badge.setTextAndCheck("Значок FluxGram рядом с ником", sp.getBoolean("flux_badge", true), true);
-                  badge.setOnClickListener(v -> {
-                      boolean on = !sp.getBoolean("flux_badge", true);
-                      sp.edit().putBoolean("flux_badge", on).apply();
-                      badge.setChecked(on);
+                  final TextCheckCell badge = newCell();
+                  badge.setTextAndCheck("Значок FluxGram рядом с ником", FluxBadge.enabled(), true);
+                  badge.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          boolean on = !FluxBadge.enabled();
+                          FluxBadge.setEnabled(on);
+                          badge.setChecked(on);
+                      }
                   });
                   list.addView(badge, matchWrap());
 
-                  TextCheckCell parts = newCell();
-                  parts.setTextAndCheck("Частицы вокруг значка", sp.getBoolean("flux_particles", true), false);
-                  parts.setOnClickListener(v -> {
-                      boolean on = !sp.getBoolean("flux_particles", true);
-                      sp.edit().putBoolean("flux_particles", on).apply();
-                      parts.setChecked(on);
+                  final TextCheckCell parts = newCell();
+                  parts.setTextAndCheck("Частицы вокруг значка", FluxBadgeDrawable.particlesEnabled(context), false);
+                  parts.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          boolean on = !FluxBadgeDrawable.particlesEnabled(context);
+                          FluxBadgeDrawable.setParticlesEnabled(context, on);
+                          parts.setChecked(on);
+                          if (badgePreview != null) {
+                              badgePreview.invalidate();
+                          }
+                      }
                   });
                   list.addView(parts, matchWrap());
-                  addNote(list, "Значок видят другие пользователи FluxGram. Частицы анимируются в профиле.");
 
-                  updateUi();
-                  return fragmentView;
+                  badgePreview = new BadgePreview(context);
+                  list.addView(badgePreview, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, AndroidUtilities.dp(92)));
+                  addNote("Значок видят другие пользователи FluxGram. Он появляется у них не сразу: приложение проверяет профили по одному в секунду. Частицы выключаются сразу, без перезапуска.");
+
+                  updateUi(true);
               }
 
               private void choose(int hue, int sat) {
                   FluxFeatures.setSeed(ctx, hue, sat);
-                  updateUi();
+                  rebuildStack();
+                  updateUi(true);
               }
 
-              private void updateUi() {
+              private void updateUi(boolean setBars) {
                   int hue = FluxFeatures.seedHue(ctx);
                   int sat = FluxFeatures.seedSat(ctx);
                   if (hue >= 0) {
-                      hueBar.setProgress(hue);
-                      satBar.setProgress(sat);
+                      if (setBars) {
+                          hueBar.setProgress(hue);
+                          satBar.setProgress(sat);
+                      }
                       hueLabel.setText("Оттенок: " + hue + "°");
                   } else {
+                      if (setBars) {
+                          hueBar.setProgress(205);
+                          satBar.setProgress(48);
+                      }
                       hueLabel.setText("Оттенок: системный (обои)");
                   }
                   for (Swatch sw : swatches) {
                       sw.invalidate();
                   }
                   preview.invalidate();
+                  styleDice();
               }
 
-              private void styleDice(TextView dice) {
+              private void styleDice() {
+                  if (dice == null) {
+                      return;
+                  }
+                  boolean dark = FluxFeatures.isDark(ctx);
                   GradientDrawable g = new GradientDrawable();
                   g.setCornerRadius(AndroidUtilities.dp(26));
-                  g.setColor(FluxFeatures.preview(ctx, Role.PRIMARY_CONTAINER, FluxFeatures.isDark(ctx)));
+                  g.setColor(FluxFeatures.preview(ctx, Role.PRIMARY_CONTAINER, dark));
                   dice.setBackground(g);
-                  dice.setTextColor(FluxFeatures.preview(ctx, Role.ON_PRIMARY_CONTAINER, FluxFeatures.isDark(ctx)));
+                  dice.setTextColor(FluxFeatures.preview(ctx, Role.ON_PRIMARY_CONTAINER, dark));
               }
 
               private LinearLayout.LayoutParams matchWrap() {
@@ -3369,14 +3946,14 @@ jobs:
                   return cell;
               }
 
-              private void addHeader(LinearLayout list, String title) {
+              private void addHeader(String title) {
                   HeaderCell header = new HeaderCell(ctx);
                   header.setText(title);
                   header.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
                   list.addView(header, matchWrap());
               }
 
-              private void addNote(LinearLayout list, String text) {
+              private void addNote(String text) {
                   TextView note = new TextView(ctx);
                   note.setText(text);
                   note.setTextSize(14);
@@ -3423,6 +4000,44 @@ jobs:
                           p.setStrokeWidth(AndroidUtilities.dp(3));
                           p.setColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
                           canvas.drawCircle(cx, cy, r + AndroidUtilities.dp(2), p);
+                      }
+                  }
+              }
+
+              // Два значка: пользователя FluxGram и официального канала. Показывают, как выглядят частицы
+              private class BadgePreview extends View {
+                  private final FluxBadgeDrawable userBadge;
+                  private final FluxBadgeDrawable officialBadge;
+                  private final Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+                  BadgePreview(Context c) {
+                      super(c);
+                      userBadge = new FluxBadgeDrawable(c, true, false);
+                      officialBadge = new FluxBadgeDrawable(c, true, true);
+                      setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                      tp.setTextSize(AndroidUtilities.dp(12));
+                      tp.setTextAlign(Paint.Align.CENTER);
+                  }
+
+                  private void drawBadge(Canvas canvas, FluxBadgeDrawable d, float cx, float cy, String label) {
+                      float scale = 2.2f;
+                      float side = d.getIntrinsicWidth() * scale;
+                      canvas.save();
+                      canvas.translate(cx - side / 2f, cy - side / 2f);
+                      canvas.scale(scale, scale);
+                      d.draw(canvas);
+                      canvas.restore();
+                      tp.setColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+                      canvas.drawText(label, cx, cy + side / 2f + AndroidUtilities.dp(14), tp);
+                  }
+
+                  @Override
+                  protected void onDraw(Canvas canvas) {
+                      float h = getHeight() * 0.42f;
+                      drawBadge(canvas, userBadge, getWidth() * 0.27f, h, "Пользователь FluxGram");
+                      drawBadge(canvas, officialBadge, getWidth() * 0.73f, h, "Официальный канал");
+                      if (FluxBadgeDrawable.particlesEnabled(getContext())) {
+                          postInvalidateOnAnimation();
                       }
                   }
               }
@@ -3521,17 +4136,23 @@ jobs:
           p = SRC + "ui/ActionBar/Theme.java"
           s = read(p)
           sig = "private static int getColorFromTable(SparseIntArray currentColors, int key, boolean[] isDefault) {\n"
+          sig2 = "public static int getColor(int key, boolean[] isDefault, boolean ignoreAnimation) {\n"
+          hook = ("        Integer fluxColor = org.telegram.messenger.FluxFeatures.override(key);\n"
+                  "        if (fluxColor != null) {\n"
+                  "            return fluxColor;\n"
+                  "        }\n")
           if "FluxFeatures.override" in s:
               ok("Theme: уже пропатчен")
-          elif s.count(sig) != 1:
-              warn("Theme.java: не найден getColorFromTable, цвета Material You не подключены")
-          else:
-              s = s.replace(sig, sig + "        Integer fluxColor = org.telegram.messenger.FluxFeatures.override(key);\n"
-                                       "        if (fluxColor != null) {\n"
-                                       "            return fluxColor;\n"
-                                       "        }\n", 1)
+          elif s.count(sig) == 1:
+              s = s.replace(sig, sig + hook, 1)
               write(p, s)
-              ok("Theme: цвета Material You подключены")
+              ok("Theme: цвета Material You подключены (getColorFromTable)")
+          elif s.count(sig2) == 1:
+              s = s.replace(sig2, sig2 + hook, 1)
+              write(p, s)
+              ok("Theme: цвета Material You подключены (getColor, запасной якорь)")
+          else:
+              warn("Theme.java: не найден ни getColorFromTable, ни getColor, цвета Material You не подключены")
 
           # 2. Списки пользователей
           p = SRC + "ui/Cells/UserCell.java"
@@ -3634,6 +4255,29 @@ jobs:
                   s = s[:mc.start()] + click + s[mc.start():]
                   write(p, s)
                   ok("SettingsActivity: пункт «Темы FluxGram» (id %d)" % new_id)
+
+          # 7. Автозапуск: фоновая проверка «О себе» у людей из списков и метка в своём профиле стартуют вместе с приложением
+          p = SRC + "messenger/ApplicationLoader.java"
+          s = read(p)
+          pat = re.compile(r'(public void onCreate\(\)\s*\{\n)')
+          if "FluxBadge.init" in s:
+              ok("ApplicationLoader: автозапуск уже подключён")
+          elif len(pat.findall(s)) != 1:
+              warn("ApplicationLoader.java: onCreate не найден, проверка запустится только при открытии профилей и списков")
+          else:
+              hook = ("        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {\n"
+                      "            @Override\n"
+                      "            public void run() {\n"
+                      "                try {\n"
+                      "                    FluxBadge.init(UserConfig.selectedAccount);\n"
+                      "                } catch (Throwable t) {\n"
+                      "                    FileLog.e(t);\n"
+                      "                }\n"
+                      "            }\n"
+                      "        }, 6000);\n")
+              s = pat.sub(lambda m: m.group(1) + hook, s, count=1)
+              write(p, s)
+              ok("ApplicationLoader: автозапуск проверки значков")
 
           with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
               f.write("## Патчи FluxGram (значок, официальный канал, темы)\n```\n" + "\n".join(report) + "\n```\n")
