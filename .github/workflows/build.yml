@@ -631,6 +631,54 @@ jobs:
           grep -rnE 'setTitle\(\s*"Telegram' TMessagesProj/src/main/java | head -20 || true
           grep -rn 'R.string.AppName' TMessagesProj/src/main/java --include=*.java | head -20 || true
 
+      - name: Все «Telegram» в строках интерфейса → FluxGram (включая языковой пакет с сервера)
+        if: ${{ env.REBRAND != 'false' }}
+        run: |
+          python3 - <<'PY'
+          import re, os, sys
+
+          NAME = os.environ["APP_NAME"]
+          p = "TMessagesProj/src/main/java/org/telegram/messenger/LocaleController.java"
+          s = open(p, encoding="utf-8").read()
+
+          if "fluxFix(" in s:
+              print("обёртки уже стоят")
+              sys.exit(0)
+
+          pat = re.compile(
+              r'(?P<mods>(?:(?:public|private|protected|static|final|synchronized)\s+)*)'
+              r'String\s+(?P<name>getString|getPluralString|formatString|formatPluralString|formatPluralStringSpaced)'
+              r'\s*\((?P<params>[^()]*)\)\s*(?P<thr>throws[^{]*)?\{')
+          cnt = [0]
+          def sub(m):
+              params = m.group("params").strip()
+              names = []
+              for x in params.split(","):
+                  x = x.strip()
+                  if x:
+                      names.append(x.split()[-1])
+              mods = m.group("mods")
+              name = m.group("name")
+              thr = (m.group("thr") or "").strip()
+              cnt[0] += 1
+              return (mods + "String " + name + "(" + params + ") " + thr + " { return fluxFix(" + name + "Flux(" + ", ".join(names) + ")); }\n    "
+                      + mods + "String " + name + "Flux(" + params + ") " + thr + " {")
+          s = pat.sub(sub, s)
+
+          if cnt[0] == 0:
+              print("::error::в LocaleController.java не найдено ни одной getString-сигнатуры")
+              sys.exit(1)
+
+          cls = re.search(r'public\s+class\s+LocaleController[^{]*\{', s)
+          helper = ('\n    private static String fluxFix(String s) { return (s != null && s.indexOf("Telegram") >= 0) ? s.replace("Telegram", "'
+                    + NAME + '") : s; }\n')
+          s = s[:cls.end()] + helper + s[cls.end():]
+          open(p, "w", encoding="utf-8").write(s)
+          print("обёрнуто методов:", cnt[0])
+          PY
+
+          grep -rnE '"Telegram[^"/:.]*"' TMessagesProj/src/main/java --include=*.java | grep -v "LocaleController.java" | head -60 || true
+
       - name: Режим шпиона (SpyMode + хук в MessagesController)
         run: |
           python3 - <<'PY'
