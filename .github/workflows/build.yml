@@ -2518,7 +2518,6 @@ jobs:
           import android.widget.Toast;
 
           import org.telegram.messenger.AndroidUtilities;
-          import org.telegram.messenger.ConnectionsManager;
           import org.telegram.messenger.FileLog;
           import org.telegram.messenger.R;
           import org.telegram.messenger.UserConfig;
