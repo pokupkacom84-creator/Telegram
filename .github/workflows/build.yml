@@ -4868,9 +4868,10 @@ jobs:
                   try {
                       for (int i = 0; i < updates.size(); i++) {
                           TLRPC.Update u = updates.get(i);
-                          if (u instanceof TLRPC.TL_updateNewMessage) {
-                              TLRPC.Message m = ((TLRPC.TL_updateNewMessage) u).message;
-                              if (m == null) continue;
+                          if (u != null && "TL_updateNewMessage".equals(u.getClass().getSimpleName())) {
+                              Object mo = u.getClass().getField("message").get(u);
+                              if (!(mo instanceof TLRPC.Message)) continue;
+                              TLRPC.Message m = (TLRPC.Message) mo;
                               if (m.out || m instanceof TLRPC.TL_messageService || m.action != null) continue;
                               long did = MessageObject.getDialogId(m);
                               if (did > 0) {
