@@ -599,6 +599,52 @@ jobs:
           print("Подменено заголовков в коде:", total)
           PY
 
+      - name: Хук AppName в LocaleController (100% название вместо Telegram)
+        if: ${{ env.REBRAND != 'false' }}
+        run: |
+          python3 - <<'PY'
+          import re, os, sys
+
+          NAME = os.environ["APP_NAME"]
+          p = "TMessagesProj/src/main/java/org/telegram/messenger/LocaleController.java"
+          s = open(p, encoding="utf-8").read()
+
+          if "FLUXNAME_HOOK" in s:
+              print("хук уже стоит")
+              sys.exit(0)
+
+          # 1) все getString*(String key, int res) { -> ранний возврат для AppName / AppNameBeta
+          pat_key = re.compile(
+              r'(\bString\s+getString\w*\(\s*(?:final\s+)?String\s+(\w+)\s*,\s*(?:final\s+)?int\s+\w+\s*\)\s*\{)')
+          cnt = [0]
+          def sub_key(m):
+              k = m.group(2)
+              cnt[0] += 1
+              return m.group(1) + ' /*FLUXNAME_HOOK*/ if ("AppName".equals(%s) || "AppNameBeta".equals(%s) || "ApplicationName".equals(%s)) return "%s";' % (k, k, k, NAME)
+          s = pat_key.sub(sub_key, s)
+
+          # 2) getString(int res) { -> то же по id ресурса
+          pat_res = re.compile(r'(\bString\s+getString\(\s*(?:final\s+)?(?:@StringRes\s+)?int\s+(\w+)\s*\)\s*\{)')
+          def sub_res(m):
+              r = m.group(2)
+              cnt[0] += 1
+              return m.group(1) + ' /*FLUXNAME_HOOK*/ if (%s == R.string.AppName || %s == R.string.AppNameBeta) return "%s";' % (r, r, NAME)
+          s = pat_res.sub(sub_res, s)
+
+          if cnt[0] == 0:
+              print("::error::в LocaleController.java не найдено ни одной getString-сигнатуры, нужен grep -n 'String getString' в этом файле")
+              sys.exit(1)
+
+          open(p, "w", encoding="utf-8").write(s)
+          print("AppName hook вставлен в методов:", cnt[0])
+          PY
+
+          # проверка: хук реально в файле
+          grep -c "FLUXNAME_HOOK" TMessagesProj/src/main/java/org/telegram/messenger/LocaleController.java
+          # диагностика: где ещё осталась строка Telegram в заголовках
+          grep -rnE 'setTitle\(\s*"Telegram' TMessagesProj/src/main/java | head -20 || true
+          grep -rn 'R.string.AppName' TMessagesProj/src/main/java --include=*.java | head -20 || true
+
       - name: Режим шпиона (SpyMode + хук в MessagesController)
         run: |
           python3 - <<'PY'
@@ -1918,7 +1964,7 @@ jobs:
           print("✅ Premium скрыт по флагу hide_premium")
           PY
 
-      - name: FluxGram - Premium (визуал), сохранение чата + затемнение, Свободный режим, ID и номер
+      - name: FluxGram - Premium (визуал), сохранение чата + затемнение
         run: |
           python3 - <<'PY'
           import re, os
@@ -1966,7 +2012,7 @@ jobs:
 
           resolve_ok = has("TL_contacts_resolveUsername") and has("TL_contacts_resolvedPeer")
 
-          # ============================================================ FluxVisual (ядро: premium, сохранение чата, удалённые диалоги, свободный режим)
+          # ============================================================ FluxVisual (ядро: premium, сохранение чата, удалённые диалоги)
           visual = r"""package org.telegram.messenger;
 
           import android.content.Context;
@@ -1988,12 +2034,10 @@ jobs:
               private static final String PREFS = "fluxgram";
               private static final boolean DEF_PREMIUM = true;
               private static final boolean DEF_KEEP_CHAT = true;
-              private static final boolean DEF_FREE_MODE = false;
               public static final float DIM_ALPHA = 0.45f;
 
               private static volatile int premiumState = -1;
               private static volatile int keepState = -1;
-              private static volatile int freeModeState = -1;
               private static Set<Long> removedDialogs;
 
               private static SharedPreferences prefs() {
@@ -2146,131 +2190,6 @@ jobs:
                   return removedDialogs.contains(dialogId);
               }
 
-              // ---------------------------------------------------------------- Свободный режим (визуальные подарки/NFT, только у себя)
-              public static boolean freeModeOn() {
-                  int s = freeModeState;
-                  if (s < 0) {
-                      SharedPreferences p = prefs();
-                      s = (p == null ? DEF_FREE_MODE : p.getBoolean("free_mode", DEF_FREE_MODE)) ? 1 : 0;
-                      freeModeState = s;
-                  }
-                  return s == 1;
-              }
-
-              public static void setFreeMode(boolean on) {
-                  putBool("free_mode", on);
-                  freeModeState = on ? 1 : 0;
-                  refreshUi();
-              }
-
-              public static final class Gift {
-                  public final String emoji;
-                  public final String title;
-
-                  public Gift(String emoji, String title) {
-                      this.emoji = emoji;
-                      this.title = title;
-                  }
-              }
-
-              public static List<Gift> getGifts() {
-                  List<Gift> list = new ArrayList<>();
-                  SharedPreferences p = prefs();
-                  String raw = p == null ? "" : p.getString("free_gifts", "");
-                  if (raw.length() == 0) {
-                      return list;
-                  }
-                  for (String row : raw.split("\n")) {
-                      int i = row.indexOf('\t');
-                      if (i < 0) {
-                          continue;
-                      }
-                      list.add(new Gift(row.substring(0, i), row.substring(i + 1)));
-                  }
-                  return list;
-              }
-
-              public static int giftCount() {
-                  return getGifts().size();
-              }
-
-              public static void addGift(String emoji, String title) {
-                  List<Gift> list = getGifts();
-                  if (list.size() >= 60) {
-                      return;
-                  }
-                  list.add(new Gift(emoji, title));
-                  saveGifts(list);
-              }
-
-              public static void removeGift(int index) {
-                  List<Gift> list = getGifts();
-                  if (index < 0 || index >= list.size()) {
-                      return;
-                  }
-                  list.remove(index);
-                  saveGifts(list);
-              }
-
-              private static void saveGifts(List<Gift> list) {
-                  StringBuilder sb = new StringBuilder();
-                  for (Gift g : list) {
-                      if (sb.length() > 0) {
-                          sb.append('\n');
-                      }
-                      sb.append(g.emoji.replace("\t", "").replace("\n", "")).append('\t').append(g.title.replace("\t", "").replace("\n", ""));
-                  }
-                  SharedPreferences p = prefs();
-                  if (p != null) {
-                      p.edit().putString("free_gifts", sb.toString()).apply();
-                  }
-                  refreshUi();
-              }
-
-              /** Маленький значок-индикатор коллекции для ника в своём профиле. Полный список — в экране «Свободный режим». */
-              public static Drawable giftBadge(Context context) {
-                  final int size = AndroidUtilities.dp(20);
-                  final String label = String.valueOf(giftCount());
-                  return new Drawable() {
-                      private final Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
-                      private final Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
-
-                      @Override
-                      public void draw(Canvas canvas) {
-                          bg.setColor(0xFFB06BFF);
-                          float r = size / 2f;
-                          canvas.drawCircle(r, r, r, bg);
-                          tp.setColor(0xFFFFFFFF);
-                          tp.setTextSize(size * 0.52f);
-                          tp.setTextAlign(Paint.Align.CENTER);
-                          canvas.drawText(label, r, r - (tp.ascent() + tp.descent()) / 2f, tp);
-                      }
-
-                      @Override
-                      public void setAlpha(int alpha) {
-                      }
-
-                      @Override
-                      public void setColorFilter(android.graphics.ColorFilter cf) {
-                      }
-
-                      @Override
-                      public int getOpacity() {
-                          return android.graphics.PixelFormat.TRANSLUCENT;
-                      }
-
-                      @Override
-                      public int getIntrinsicWidth() {
-                          return size;
-                      }
-
-                      @Override
-                      public int getIntrinsicHeight() {
-                          return size;
-                      }
-                  };
-              }
-
               public static void refreshUi() {
                   AndroidUtilities.runOnUIThread(new Runnable() {
                       @Override
@@ -2295,7 +2214,7 @@ jobs:
           n_glob = "".join("                    NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.%s);\n" % n for n in events)
           visual = visual.replace("@NOTIFY_ACC@", n_acc).replace("@NOTIFY_GLOBAL@", n_glob)
           write(msg + "/FluxVisual.java", visual)
-          ok("FluxVisual пересобран (без звёзд и интерфейса; добавлены Removed-диалоги и Свободный режим, события: %s)" % ", ".join(events))
+          ok("FluxVisual пересобран (без звёзд и интерфейса; Removed-диалоги, события: %s)" % ", ".join(events))
 
           # ============================================================ удаляем старые экраны «Звёзды» и «Интерфейс Telegram»
           for f, title in ((ui + "/FluxStarsActivity.java", "Звёзды"), (ui + "/FluxInterfaceActivity.java", "Интерфейс Telegram")):
@@ -2317,439 +2236,18 @@ jobs:
           # откатываем hide_premium для FluxVisual.premiumOn (SettingsActivity) — больше не завязано на звёзды/интерфейс, оставляем как есть
           ok("Premium (визуал) и Сохранять чат оставлены без изменений")
 
-          # ============================================================ экран «Свободный режим»
-          free = r"""package org.telegram.ui;
-
-          import android.app.AlertDialog.Builder;
-          import android.content.Context;
-          import android.graphics.drawable.GradientDrawable;
-          import android.text.InputType;
-          import android.view.Gravity;
-          import android.view.View;
-          import android.view.ViewGroup;
-          import android.widget.EditText;
-          import android.widget.FrameLayout;
-          import android.widget.LinearLayout;
-          import android.widget.ScrollView;
-          import android.widget.TextView;
-
-          import org.telegram.messenger.AndroidUtilities;
-          import org.telegram.messenger.FluxVisual;
-          import org.telegram.messenger.R;
-          import org.telegram.ui.ActionBar.ActionBar;
-          import org.telegram.ui.ActionBar.BaseFragment;
-          import org.telegram.ui.ActionBar.Theme;
-          import org.telegram.ui.Cells.HeaderCell;
-          import org.telegram.ui.Cells.TextCheckCell;
-          import org.telegram.ui.Cells.TextSettingsCell;
-
-          public class FluxFreeModeActivity extends BaseFragment {
-
-              private LinearLayout giftsCard;
-              private TextCheckCell toggle;
-
-              @Override
-              public View createView(final Context context) {
-                  actionBar.setBackButtonImage(R.drawable.ic_ab_back);
-                  actionBar.setAllowOverlayTitle(true);
-                  actionBar.setTitle("Свободный режим");
-                  actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
-                      @Override
-                      public void onItemClick(int id) {
-                          if (id == -1) {
-                              finishFragment();
-                          }
-                      }
-                  });
-
-                  FrameLayout root = new FrameLayout(context);
-                  root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
-                  fragmentView = root;
-
-                  ScrollView scroll = new ScrollView(context);
-                  root.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-                  LinearLayout list = new LinearLayout(context);
-                  list.setOrientation(LinearLayout.VERTICAL);
-                  scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-                  HeaderCell h1 = new HeaderCell(context);
-                  h1.setText("Коллекция (визуал, только у вас)");
-                  list.addView(h1, matchWrap());
-
-                  LinearLayout c1 = card(context, list);
-                  toggle = new TextCheckCell(context);
-                  toggle.setTextAndCheck("Показывать значок в профиле", FluxVisual.freeModeOn(), false);
-                  toggle.setOnClickListener(v -> {
-                      FluxVisual.setFreeMode(!FluxVisual.freeModeOn());
-                      toggle.setChecked(FluxVisual.freeModeOn());
-                  });
-                  c1.addView(toggle, matchWrap());
-                  note(list, context, "Подарки и NFT здесь — локальная витрина: видны только вам на этом устройстве, в саму коллекцию Telegram и другим людям не попадают и не тратят звёзды.");
-
-                  HeaderCell h2 = new HeaderCell(context);
-                  h2.setText("Ваши предметы");
-                  list.addView(h2, matchWrap());
-                  giftsCard = card(context, list);
-
-                  TextSettingsCell add = new TextSettingsCell(context);
-                  add.setText("Добавить подарок / NFT", false);
-                  add.setOnClickListener(v -> showAddDialog(context));
-                  list.addView(add, matchWrap());
-
-                  refresh(context);
-                  return fragmentView;
-              }
-
-              private void showAddDialog(Context context) {
-                  LinearLayout box = new LinearLayout(context);
-                  box.setOrientation(LinearLayout.VERTICAL);
-                  box.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(6), AndroidUtilities.dp(21), AndroidUtilities.dp(6));
-
-                  final EditText emoji = new EditText(context);
-                  emoji.setHint("Эмодзи, например \uD83C\uDF81");
-                  emoji.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
-                  box.addView(emoji, matchWrap());
-
-                  final EditText title = new EditText(context);
-                  title.setHint("Название, например Plush Pepe");
-                  title.setInputType(InputType.TYPE_CLASS_TEXT);
-                  title.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
-                  box.addView(title, matchWrap());
-
-                  new Builder(context)
-                          .setTitle("Новый предмет")
-                          .setView(box)
-                          .setPositiveButton("Добавить", (d, w) -> {
-                              String e = emoji.getText().toString().trim();
-                              String t = title.getText().toString().trim();
-                              if (e.length() == 0) {
-                                  e = "\uD83C\uDF81";
-                              }
-                              if (t.length() == 0) {
-                                  t = "Подарок";
-                              }
-                              FluxVisual.addGift(e, t);
-                              refresh(context);
-                          })
-                          .setNegativeButton("Отмена", null)
-                          .show();
-              }
-
-              private void refresh(Context context) {
-                  giftsCard.removeAllViews();
-                  java.util.List<FluxVisual.Gift> gifts = FluxVisual.getGifts();
-                  if (gifts.isEmpty()) {
-                      TextView empty = new TextView(context);
-                      empty.setText("Пока пусто");
-                      empty.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
-                      empty.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(16), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
-                      giftsCard.addView(empty, matchWrap());
-                      return;
-                  }
-                  for (int i = 0; i < gifts.size(); i++) {
-                      final int idx = i;
-                      FluxVisual.Gift g = gifts.get(i);
-                      TextSettingsCell cell = new TextSettingsCell(context);
-                      cell.setText(g.emoji + "  " + g.title, i < gifts.size() - 1);
-                      cell.setOnClickListener(v -> new Builder(context)
-                              .setTitle("Удалить предмет?")
-                              .setMessage(g.emoji + " " + g.title)
-                              .setPositiveButton("Удалить", (d, w) -> {
-                                  FluxVisual.removeGift(idx);
-                                  refresh(context);
-                              })
-                              .setNegativeButton("Отмена", null)
-                              .show());
-                      giftsCard.addView(cell, matchWrap());
-                  }
-              }
-
-              private LinearLayout.LayoutParams matchWrap() {
-                  return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-              }
-
-              private LinearLayout card(Context context, LinearLayout list) {
-                  LinearLayout c = new LinearLayout(context);
-                  c.setOrientation(LinearLayout.VERTICAL);
-                  GradientDrawable bg = new GradientDrawable();
-                  bg.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-                  bg.setCornerRadius(AndroidUtilities.dp(18));
-                  c.setBackground(bg);
-                  c.setClipToOutline(true);
-                  LinearLayout.LayoutParams lp = matchWrap();
-                  lp.setMargins(AndroidUtilities.dp(12), AndroidUtilities.dp(6), AndroidUtilities.dp(12), AndroidUtilities.dp(6));
-                  list.addView(c, lp);
-                  return c;
-              }
-
-              private void note(LinearLayout list, Context context, String text) {
-                  TextView t = new TextView(context);
-                  t.setText(text);
-                  t.setTextSize(14);
-                  t.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
-                  t.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(10), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
-                  list.addView(t, matchWrap());
-              }
-          }
-          """
-          write(ui + "/FluxFreeModeActivity.java", free)
-          ok("FluxFreeModeActivity создан")
-
-          # ============================================================ экран «ID и номер»
-          if resolve_ok:
-              cls_req = Q["TL_contacts_resolveUsername"]
-              cls_res = Q["TL_contacts_resolvedPeer"]
-          else:
-              cls_req = cls_res = None
-
-          idscreen = r"""package org.telegram.ui;
-
-          import android.content.ClipData;
-          import android.content.ClipboardManager;
-          import android.content.Context;
-          import android.graphics.drawable.GradientDrawable;
-          import android.view.View;
-          import android.view.ViewGroup;
-          import android.widget.EditText;
-          import android.widget.FrameLayout;
-          import android.widget.LinearLayout;
-          import android.widget.ScrollView;
-          import android.widget.TextView;
-          import android.widget.Toast;
-
-          import org.telegram.messenger.AndroidUtilities;
-          import org.telegram.messenger.FileLog;
-          import org.telegram.messenger.R;
-          import org.telegram.messenger.UserConfig;
-          import org.telegram.tgnet.TLRPC;
-          import org.telegram.ui.ActionBar.ActionBar;
-          import org.telegram.ui.ActionBar.BaseFragment;
-          import org.telegram.ui.ActionBar.Theme;
-          import org.telegram.ui.Cells.HeaderCell;
-          import org.telegram.ui.Cells.TextSettingsCell;
-
-          public class FluxIdActivity extends BaseFragment {
-
-              private LinearLayout resultCard;
-              private TextView resultText;
-
-              @Override
-              public View createView(final Context context) {
-                  actionBar.setBackButtonImage(R.drawable.ic_ab_back);
-                  actionBar.setAllowOverlayTitle(true);
-                  actionBar.setTitle("ID и номер");
-                  actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
-                      @Override
-                      public void onItemClick(int id) {
-                          if (id == -1) {
-                              finishFragment();
-                          }
-                      }
-                  });
-
-                  FrameLayout root = new FrameLayout(context);
-                  root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
-                  fragmentView = root;
-
-                  ScrollView scroll = new ScrollView(context);
-                  root.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-                  LinearLayout list = new LinearLayout(context);
-                  list.setOrientation(LinearLayout.VERTICAL);
-                  scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-                  HeaderCell h0 = new HeaderCell(context);
-                  h0.setText("Ваш аккаунт");
-                  list.addView(h0, matchWrap());
-                  LinearLayout c0 = card(context, list);
-                  TextSettingsCell self = new TextSettingsCell(context);
-                  long selfId = UserConfig.getInstance(currentAccount).getClientUserId();
-                  self.setText("ID: " + selfId, false);
-                  self.setOnClickListener(v -> copy(context, String.valueOf(selfId)));
-                  c0.addView(self, matchWrap());
-
-                  HeaderCell h1 = new HeaderCell(context);
-                  h1.setText("Найти по @username");
-                  list.addView(h1, matchWrap());
-                  LinearLayout c1 = card(context, list);
-                  final EditText input = new EditText(context);
-                  input.setHint("@username (человек, бот, чат, канал)");
-                  input.setSingleLine(true);
-                  input.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
-                  input.setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
-                  input.setBackground(null);
-                  input.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(14), AndroidUtilities.dp(21), AndroidUtilities.dp(14));
-                  c1.addView(input, matchWrap());
-
-                  TextSettingsCell go = new TextSettingsCell(context);
-                  go.setText("Найти", false);
-                  go.setOnClickListener(v -> resolve(context, input.getText().toString().trim()));
-                  c1.addView(go, matchWrap());
-
-                  resultCard = card(context, list);
-                  resultText = new TextView(context);
-                  resultText.setTextIsSelectable(true);
-                  resultText.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
-                  resultText.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(16), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
-                  resultText.setText("Результат появится здесь");
-                  resultCard.addView(resultText, matchWrap());
-
-                  note(list, context, "Номер телефона показывается, только если собеседник не скрыл его в настройках приватности: Telegram просто не передаёт клиенту скрытый номер, обойти это нельзя.");
-                  return fragmentView;
-              }
-
-              private void resolve(Context context, String raw) {
-                  String username = raw.startsWith("@") ? raw.substring(1) : raw;
-                  if (username.length() == 0) {
-                      resultText.setText("Введите @username");
-                      return;
-                  }
-          RESOLVE_BODY
-              }
-
-              private void showResult(TLRPC.User u, TLRPC.Chat chat) {
-                  StringBuilder sb = new StringBuilder();
-                  if (u != null) {
-                      sb.append(u.bot ? "Бот\n" : "Пользователь\n");
-                      sb.append("ID: ").append(u.id).append('\n');
-                      if (u.username != null) {
-                          sb.append("@").append(u.username).append('\n');
-                      }
-                      if (u.phone != null && u.phone.length() > 0) {
-                          sb.append("Телефон: +").append(u.phone).append('\n');
-                      } else {
-                          sb.append("Телефон: скрыт или недоступен\n");
-                      }
-                  } else if (chat != null) {
-                      sb.append(chat.megagroup ? "Супергруппа\n" : (chat.broadcast ? "Канал\n" : "Группа\n"));
-                      sb.append("ID: ").append(-chat.id).append('\n');
-                      if (chat.username != null) {
-                          sb.append("@").append(chat.username).append('\n');
-                      }
-                  }
-                  resultText.setText(sb.toString().trim());
-              }
-
-              private void copy(Context context, String text) {
-                  ClipboardManager cm = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
-                  if (cm != null) {
-                      cm.setPrimaryClip(ClipData.newPlainText("id", text));
-                      Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show();
-                  }
-              }
-
-              private LinearLayout.LayoutParams matchWrap() {
-                  return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-              }
-
-              private LinearLayout card(Context context, LinearLayout list) {
-                  LinearLayout c = new LinearLayout(context);
-                  c.setOrientation(LinearLayout.VERTICAL);
-                  GradientDrawable bg = new GradientDrawable();
-                  bg.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-                  bg.setCornerRadius(AndroidUtilities.dp(18));
-                  c.setBackground(bg);
-                  c.setClipToOutline(true);
-                  LinearLayout.LayoutParams lp = matchWrap();
-                  lp.setMargins(AndroidUtilities.dp(12), AndroidUtilities.dp(6), AndroidUtilities.dp(12), AndroidUtilities.dp(6));
-                  list.addView(c, lp);
-                  return c;
-              }
-
-              private void note(LinearLayout list, Context context, String text) {
-                  TextView t = new TextView(context);
-                  t.setText(text);
-                  t.setTextSize(14);
-                  t.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
-                  t.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(10), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
-                  list.addView(t, matchWrap());
-              }
-          }
-          """
-          if resolve_ok:
-              resolve_body = ("        " + cls_req + " req = new " + cls_req + "();\n"
-                               "        req.username = username;\n"
-                               "        resultText.setText(\"Ищу...\");\n"
-                               "        getConnectionsManager().sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {\n"
-                               "            if (error != null || !(response instanceof " + cls_res + ")) {\n"
-                               "                resultText.setText(\"Не найдено: \" + (error != null ? error.text : \"нет ответа\"));\n"
-                               "                return;\n"
-                               "            }\n"
-                               "            " + cls_res + " res = (" + cls_res + ") response;\n"
-                               "            TLRPC.User u = res.users.isEmpty() ? null : res.users.get(0);\n"
-                               "            TLRPC.Chat chat = res.chats.isEmpty() ? null : res.chats.get(0);\n"
-                               "            showResult(u, chat);\n"
-                               "        }));\n")
-          else:
-              resolve_body = ("        resultText.setText(\"Поиск по username недоступен в этой сборке (нет TL_contacts_resolveUsername)\");\n")
-          idscreen = idscreen.replace("RESOLVE_BODY\n", resolve_body)
-          write(ui + "/FluxIdActivity.java", idscreen)
-          if resolve_ok:
-              ok("FluxIdActivity создан (поиск по username через %s)" % cls_req)
-          else:
-              warn("FluxIdActivity создан, но TL_contacts_resolveUsername не найден в схеме — поиск по username недоступен, виден только свой ID")
-
-          # ============================================================ перестраиваем хаб «Настройки FluxGram»
+          # ============================================================ хаб «Настройки FluxGram»: убираем пункты Звёзды / Интерфейс Telegram
           hub_p = ui + "/FluxHubActivity.java"
           hub = read(hub_p)
           if not hub:
-              warn("FluxHubActivity.java не найден, пункты не добавлены")
+              warn("FluxHubActivity.java не найден, чистить нечего")
           else:
-              # убираем прежние ссылки на Звёзды / Интерфейс Telegram
               before = hub
               hub = re.sub(r'\n\s*TextSettingsCell fluxStars = new TextSettingsCell\(context\);.*?c\.addView\(fluxStars,[^\n]*\);\n', "\n", hub, flags=re.S)
               hub = re.sub(r'\n\s*TextSettingsCell fluxIface = new TextSettingsCell\(context\);.*?c\.addView\(fluxIface,[^\n]*\);\n', "\n", hub, flags=re.S)
-              removed = hub != before
-              if "FluxFreeModeActivity" in hub and "FluxIdActivity" in hub:
-                  ok("FluxHub: пункты Свободный режим / ID и номер уже добавлены")
-              else:
-                  m = re.search(r'\n([ \t]*)c\.addView\(spy,[^\n]*\);', hub)
-                  if not m:
-                      warn("FluxHub: не нашёл c.addView(spy, ...), новые пункты не добавлены")
-                  else:
-                      i = m.group(1)
-                      LP = "new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)"
-                      def link(var, title, cls, last):
-                          div = "false" if last else "true"
-                          return ("\n" + i + "TextSettingsCell " + var + " = new TextSettingsCell(context);"
-                                  "\n" + i + var + ".setText(\"" + title + "\", " + div + ");"
-                                  "\n" + i + var + ".setOnClickListener(view -> presentFragment(new " + cls + "()));"
-                                  "\n" + i + "c.addView(" + var + ", " + LP + ");")
-                      add = link("fluxFree", "Свободный режим", "FluxFreeModeActivity", False) + link("fluxId", "ID и номер", "FluxIdActivity", True)
-                      hub = hub[:m.end()] + add + hub[m.end():]
-                      if removed:
-                          ok("FluxHub: убраны пункты Звёзды и Интерфейс Telegram")
-                      ok("FluxHub: добавлены пункты Свободный режим и ID и номер")
-                      write(hub_p, hub)
-
-          # ============================================================ своя коллекция в профиле (только у себя): значок рядом с ником
-          p = ui + "/ProfileActivity.java"
-          s = read(p)
-          anchor = ('} else if (FluxBadge.isFluxUser(user.id, userInfo != null ? userInfo.about : null)) {\n'
-                    '                    nameTextView.setRightDrawable2(FluxBadge.drawableAnimated(getContext()));\n'
-                    '                    nameTextViewRightDrawable2ContentDescription = "FluxGram";\n'
-                    '                } else {')
-          if "FluxVisual.freeModeOn" in s:
-              ok("ProfileActivity: значок коллекции уже подключён")
-          elif anchor in s:
-              insert = ('} else if (FluxVisual.freeModeOn() && FluxVisual.isSelf(user.id) && FluxVisual.giftCount() > 0) {\n'
-                        '                    nameTextView.setRightDrawable2(FluxVisual.giftBadge(getContext()));\n'
-                        '                    nameTextViewRightDrawable2ContentDescription = "Коллекция FluxGram: " + FluxVisual.giftCount();\n'
-                        '                ' + anchor)
-              s = s.replace(anchor, insert, 1)
-              s = add_import(s, "import org.telegram.messenger.FluxVisual;")
-              write(p, s)
-              ok("ProfileActivity: значок коллекции рядом с ником в своём профиле (тап открывает «Свободный режим»)")
-          else:
-              warn("ProfileActivity: якорь FluxBadge.isFluxUser не найден, значок коллекции не подключён")
-
-          # открытие «Свободный режим» по тапу на значок — используем уже существующий обработчик клика по бейджу, если он есть
-          p2 = ui + "/ProfileActivity.java"
-          s2 = read(p2)
-          pat = re.compile(r'nameTextView\.setRightDrawable2OnClickListener\(')
-          if pat.search(s2):
-              ok("ProfileActivity: обработчик клика по значку уже есть, оставлен как есть")
-          else:
-              warn("ProfileActivity: отдельного клика по значку коллекции нет, открыть «Свободный режим» можно только из «Настройки FluxGram»")
+              if hub != before:
+                  write(hub_p, hub)
+                  ok("FluxHub: убраны пункты Звёзды и Интерфейс Telegram")
 
           # ============================================================ затемнение удалённых сообщений (как в AyuGram)
           p = ui + "/Cells/ChatMessageCell.java"
@@ -2799,7 +2297,7 @@ jobs:
                       warn("DialogCell: сигнатура setDialog(TLRPC.Dialog ...) не найдена, затемнение в списке чатов не подключено")
 
           with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
-              f.write("## FluxGram v2: затемнение удалённого, Свободный режим, ID и номер (без звёзд/интерфейса)\n```\n" + "\n".join(report) + "\n```\n")
+              f.write("## FluxGram v2: затемнение удалённого (без звёзд/интерфейса)\n```\n" + "\n".join(report) + "\n```\n")
           PY
 
       - name: API ключи (необязательно, из secrets APP_ID / APP_HASH)
@@ -5413,6 +4911,935 @@ jobs:
 
           with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
               f.write("## Патчи FluxGram (значок, официальный канал, темы)\n```\n" + "\n".join(report) + "\n```\n")
+          PY
+
+      - name: Автоответчик и копирование с форматированием (премиум-эмодзи, цитаты)
+        run: |
+          set -e
+          U="TMessagesProj/src/main/java/org/telegram/ui"
+          M="TMessagesProj/src/main/java/org/telegram/messenger"
+
+          # ======================================================== AutoReply.java
+          cat > "$M/AutoReply.java" <<'JAVA'
+          package org.telegram.messenger;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+
+          import org.telegram.tgnet.TLRPC;
+
+          import java.util.ArrayList;
+          import java.util.Random;
+          import java.util.concurrent.ConcurrentHashMap;
+
+          /** Автоответчик: отвечает на личные сообщения, пока приложение не на экране (ты офлайн). */
+          public class AutoReply {
+              public static final String KEY_ENABLED = "ar_enabled";
+              public static final String KEY_TEXT = "ar_text";
+              public static final String KEY_CONTACTS = "ar_contacts_only";
+              public static final String KEY_ONLINE = "ar_when_online";
+              public static final String KEY_COOLDOWN = "ar_cooldown";
+              public static final String DEFAULT_TEXT = "Сейчас я не в сети. Отвечу, как только смогу.";
+              public static final int[] COOLDOWN_HOURS = {1, 6, 24, 168};
+              public static final String[] COOLDOWN_TITLES = {"1 час", "6 часов", "1 день", "1 неделя"};
+
+              // собеседники, которым мы только что ответили: для них режим призрака не должен слать «прочитано»
+              private static final ConcurrentHashMap<String, Long> SUPPRESS = new ConcurrentHashMap<>();
+              private static final Random RND = new Random();
+
+              private static SharedPreferences prefs() {
+                  Context c = ApplicationLoader.applicationContext;
+                  return c == null ? null : c.getSharedPreferences("flux_autoreply", Context.MODE_PRIVATE);
+              }
+
+              public static boolean get(String key) {
+                  SharedPreferences p = prefs();
+                  return p != null && p.getBoolean(key, false);
+              }
+
+              public static void set(String key, boolean value) {
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putBoolean(key, value).apply();
+                  }
+              }
+
+              public static String text() {
+                  SharedPreferences p = prefs();
+                  return p == null ? DEFAULT_TEXT : p.getString(KEY_TEXT, DEFAULT_TEXT);
+              }
+
+              public static void setText(String value) {
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putString(KEY_TEXT, value == null ? "" : value).apply();
+                  }
+              }
+
+              public static int cooldown() {
+                  SharedPreferences p = prefs();
+                  int i = p == null ? 1 : p.getInt(KEY_COOLDOWN, 1);
+                  return Math.max(0, Math.min(COOLDOWN_HOURS.length - 1, i));
+              }
+
+              public static void setCooldown(int index) {
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putInt(KEY_COOLDOWN, index).apply();
+                  }
+              }
+
+              /** GhostMode спрашивает: этот запрос на отправку наш автоответ? Тогда «прочитано» не шлём. */
+              public static boolean suppressed(String peerKey) {
+                  if (peerKey == null) return false;
+                  Long until = SUPPRESS.get(peerKey);
+                  if (until == null) return false;
+                  if (System.currentTimeMillis() > until) {
+                      SUPPRESS.remove(peerKey);
+                      return false;
+                  }
+                  return true;
+              }
+
+              private static boolean isForeground() {
+                  try {
+                      return !ApplicationLoader.class.getField("mainInterfacePaused").getBoolean(null);
+                  } catch (Throwable t) {
+                      return false;
+                  }
+              }
+
+              /** Вызывается из MessagesController.processUpdateArray */
+              public static void filterUpdates(int acc, ArrayList<TLRPC.Update> updates) {
+                  if (updates == null || !get(KEY_ENABLED)) return;
+                  try {
+                      for (int i = 0; i < updates.size(); i++) {
+                          TLRPC.Update u = updates.get(i);
+                          if (u instanceof TLRPC.TL_updateNewMessage) {
+                              TLRPC.Message m = ((TLRPC.TL_updateNewMessage) u).message;
+                              if (m == null || m.out || m instanceof TLRPC.TL_messageService || m.action != null) continue;
+                              long did = MessageObject.getDialogId(m);
+                              if (did > 0) {
+                                  consider(acc, did, m.message, m.date);
+                              }
+                          }
+                      }
+                  } catch (Throwable ignore) { }
+              }
+
+              /** Вызывается из MessagesController.processUpdates (короткие личные сообщения) */
+              public static void onUpdates(int acc, TLRPC.Updates updates) {
+                  if (updates == null || !get(KEY_ENABLED)) return;
+                  try {
+                      if (updates instanceof TLRPC.TL_updateShortMessage) {
+                          TLRPC.TL_updateShortMessage s = (TLRPC.TL_updateShortMessage) updates;
+                          if (!s.out) {
+                              long uid = s.user_id;
+                              consider(acc, uid, s.message, s.date);
+                          }
+                      }
+                  } catch (Throwable ignore) { }
+              }
+
+              private static void consider(final int acc, final long uid, String incoming, int date) {
+                  try {
+                      long now = System.currentTimeMillis() / 1000;
+                      // старые сообщения (догрузка после долгого офлайна) не трогаем
+                      if (Math.abs(now - date) > 600) return;
+                      if (uid == 777000L || uid == UserConfig.getInstance(acc).getClientUserId()) return;
+                      if (!get(KEY_ONLINE) && isForeground()) return;
+
+                      final String reply = text();
+                      if (reply == null || reply.trim().isEmpty()) return;
+                      if (incoming != null && incoming.equals(reply)) return; // защита от переписки двух автоответчиков
+
+                      TLRPC.User user = MessagesController.getInstance(acc).getUser(uid);
+                      if (user != null && (user.bot || user.deleted || user.self)) return;
+                      if (get(KEY_CONTACTS) && (user == null || !(user.contact || user.mutual_contact))) return;
+
+                      SharedPreferences p = prefs();
+                      if (p == null) return;
+                      String k = "last_" + acc + "_" + uid;
+                      long last = p.getLong(k, 0);
+                      if (now - last < COOLDOWN_HOURS[cooldown()] * 3600L) return;
+                      p.edit().putLong(k, now).apply();
+
+                      SUPPRESS.put("u" + uid, System.currentTimeMillis() + 30000L);
+                      AndroidUtilities.runOnUIThread(new Runnable() {
+                          @Override
+                          public void run() {
+                              try {
+                                  send(acc, uid, reply);
+                              } catch (Throwable ignore) { }
+                          }
+                      }, 1500 + RND.nextInt(2500));
+                  } catch (Throwable ignore) { }
+              }
+
+              private static void send(int acc, long dialogId, String text) {
+                  /*@SEND@*/
+              }
+          }
+          JAVA
+
+          # ======================================================== FluxClip.java
+          cat > "$M/FluxClip.java" <<'JAVA'
+          package org.telegram.messenger;
+
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.graphics.Paint;
+          import android.os.SystemClock;
+          import android.text.Editable;
+          import android.text.Spannable;
+          import android.text.SpannableStringBuilder;
+          import android.util.Base64;
+          import android.widget.EditText;
+
+          import org.telegram.tgnet.SerializedData;
+          import org.telegram.tgnet.TLRPC;
+
+          import java.lang.reflect.Field;
+          import java.lang.reflect.Method;
+          import java.lang.reflect.Modifier;
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.Comparator;
+          import java.util.List;
+
+          /**
+           * Копирование с форматированием: при копировании сообщения запоминаем его entities
+           * (премиум-эмодзи, цитаты, жирный, спойлер, моно, ссылки...) и возвращаем их при вставке в Telegram.
+           * Другим приложениям уходит обычный текст + html.
+           */
+          public class FluxClip {
+              private static final String PREFS = "flux_clip";
+              private static final String KEY_ENABLED = "enabled";
+
+              private static volatile MessageObject source;
+              private static volatile long sourceTime;
+              private static String lastPlain;
+              private static String lastEntities;
+
+              private static SharedPreferences prefs() {
+                  Context c = ApplicationLoader.applicationContext;
+                  return c == null ? null : c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+              }
+
+              public static boolean enabled() {
+                  SharedPreferences p = prefs();
+                  return p == null || p.getBoolean(KEY_ENABLED, true);
+              }
+
+              public static void setEnabled(boolean v) {
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putBoolean(KEY_ENABLED, v).apply();
+                  }
+              }
+
+              /** ChatActivity.processSelectedOption: запоминаем сообщение, с которым сейчас работает меню */
+              public static void setSource(MessageObject m) {
+                  source = m;
+                  sourceTime = SystemClock.elapsedRealtime();
+              }
+
+              /** TextSelectionHelper: копирование выделенного куска текста сообщения */
+              public static CharSequence hint(Object helper, CharSequence text) {
+                  try {
+                      Object view = fieldValue(helper, "selectedView");
+                      if (view instanceof org.telegram.ui.Cells.ChatMessageCell) {
+                          MessageObject m = ((org.telegram.ui.Cells.ChatMessageCell) view).getMessageObject();
+                          if (m != null) {
+                              setSource(m);
+                          }
+                      }
+                  } catch (Throwable ignore) { }
+                  return text;
+              }
+
+              private static Object fieldValue(Object o, String name) {
+                  try {
+                      for (Class<?> c = o.getClass(); c != null; c = c.getSuperclass()) {
+                          try {
+                              Field f = c.getDeclaredField(name);
+                              f.setAccessible(true);
+                              return f.get(o);
+                          } catch (NoSuchFieldException ignore) { }
+                      }
+                      Field outer = null;
+                      try {
+                          outer = o.getClass().getDeclaredField("this$0");
+                      } catch (NoSuchFieldException ignore) { }
+                      if (outer != null) {
+                          outer.setAccessible(true);
+                          Object parent = outer.get(o);
+                          if (parent != null && parent != o) {
+                              return fieldValue(parent, name);
+                          }
+                      }
+                  } catch (Throwable ignore) { }
+                  return null;
+              }
+
+              // ------------------------------------------------------------------ копирование
+
+              /** AndroidUtilities.addToClipboard: true = мы положили в буфер текст вместе с форматированием */
+              public static boolean put(CharSequence str) {
+                  try {
+                      if (str == null || !enabled()) return false;
+                      MessageObject m = source;
+                      if (m == null || SystemClock.elapsedRealtime() - sourceTime > 1500 || m.messageOwner == null) return false;
+                      String full = m.messageOwner.message;
+                      ArrayList<TLRPC.MessageEntity> all = m.messageOwner.entities;
+                      if (full == null || all == null || all.isEmpty()) return false;
+                      String plain = str.toString();
+                      if (plain.isEmpty() || plain.length() > 20000) return false;
+                      int idx = full.indexOf(plain);
+                      if (idx < 0) return false;
+                      ArrayList<TLRPC.MessageEntity> cut = clip(all, idx, plain.length());
+                      if (cut.isEmpty()) return false;
+                      String data = encode(cut);
+                      if (data == null) return false;
+                      Context ctx = ApplicationLoader.applicationContext;
+                      ClipboardManager cm = (ClipboardManager) ctx.getSystemService(Context.CLIPBOARD_SERVICE);
+                      if (cm == null) return false;
+                      cm.setPrimaryClip(ClipData.newHtmlText("label", plain, toHtml(plain, cut)));
+                      lastPlain = plain;
+                      lastEntities = data;
+                      SharedPreferences p = prefs();
+                      if (p != null) {
+                          p.edit().putString("plain", plain).putString("ents", data).apply();
+                      }
+                      return true;
+                  } catch (Throwable t) {
+                      return false;
+                  }
+              }
+
+              private static ArrayList<TLRPC.MessageEntity> clip(List<TLRPC.MessageEntity> all, int from, int len) {
+                  ArrayList<TLRPC.MessageEntity> out = new ArrayList<>();
+                  for (TLRPC.MessageEntity e : all) {
+                      int s = Math.max(e.offset, from);
+                      int t = Math.min(e.offset + e.length, from + len);
+                      if (t <= s) continue;
+                      TLRPC.MessageEntity c = copy(e);
+                      if (c == null) continue;
+                      c.offset = s - from;
+                      c.length = t - s;
+                      out.add(c);
+                  }
+                  return out;
+              }
+
+              private static TLRPC.MessageEntity copy(TLRPC.MessageEntity e) {
+                  try {
+                      SerializedData d = new SerializedData();
+                      e.serializeToStream(d);
+                      SerializedData r = new SerializedData(d.toByteArray());
+                      int c = r.readInt32(false);
+                      return TLRPC.MessageEntity.TLdeserialize(r, c, false);
+                  } catch (Throwable t) {
+                      return null;
+                  }
+              }
+
+              private static String encode(List<TLRPC.MessageEntity> list) {
+                  try {
+                      SerializedData d = new SerializedData();
+                      d.writeInt32(list.size());
+                      for (TLRPC.MessageEntity e : list) {
+                          e.serializeToStream(d);
+                      }
+                      return Base64.encodeToString(d.toByteArray(), Base64.NO_WRAP);
+                  } catch (Throwable t) {
+                      return null;
+                  }
+              }
+
+              private static ArrayList<TLRPC.MessageEntity> decode(String data) {
+                  try {
+                      SerializedData r = new SerializedData(Base64.decode(data, Base64.NO_WRAP));
+                      int n = r.readInt32(false);
+                      ArrayList<TLRPC.MessageEntity> out = new ArrayList<>();
+                      for (int i = 0; i < n; i++) {
+                          int c = r.readInt32(false);
+                          TLRPC.MessageEntity e = TLRPC.MessageEntity.TLdeserialize(r, c, false);
+                          if (e != null) {
+                              out.add(e);
+                          }
+                      }
+                      return out;
+                  } catch (Throwable t) {
+                      return null;
+                  }
+              }
+
+              // ------------------------------------------------------------------ html для других приложений
+
+              private static String tag(TLRPC.MessageEntity e, boolean open) {
+                  String n = e.getClass().getSimpleName();
+                  String t = null;
+                  if (n.contains("Bold")) t = "b";
+                  else if (n.contains("Italic")) t = "i";
+                  else if (n.contains("Underline")) t = "u";
+                  else if (n.contains("Strike")) t = "s";
+                  else if (n.contains("Blockquote")) t = "blockquote";
+                  else if (n.contains("Pre")) t = "pre";
+                  else if (n.contains("Code") && !n.contains("Custom")) t = "code";
+                  if (t != null) return open ? "<" + t + ">" : "</" + t + ">";
+                  if (n.contains("TextUrl")) {
+                      if (!open) return "</a>";
+                      try {
+                          Object url = e.getClass().getField("url").get(e);
+                          return "<a href=\"" + String.valueOf(url).replace("\"", "&quot;") + "\">";
+                      } catch (Throwable ignore) {
+                          return null;
+                      }
+                  }
+                  return null;
+              }
+
+              private static String toHtml(String text, List<TLRPC.MessageEntity> ents) {
+                  ArrayList<TLRPC.MessageEntity> order = new ArrayList<>(ents);
+                  Collections.sort(order, new Comparator<TLRPC.MessageEntity>() {
+                      @Override
+                      public int compare(TLRPC.MessageEntity a, TLRPC.MessageEntity b) {
+                          if (a.offset != b.offset) return a.offset < b.offset ? -1 : 1;
+                          return b.length - a.length;
+                      }
+                  });
+                  StringBuilder sb = new StringBuilder();
+                  int n = text.length();
+                  for (int i = 0; i <= n; i++) {
+                      for (int k = order.size() - 1; k >= 0; k--) {
+                          TLRPC.MessageEntity e = order.get(k);
+                          if (e.offset + e.length == i) {
+                              String t = tag(e, false);
+                              if (t != null) sb.append(t);
+                          }
+                      }
+                      if (i == n) break;
+                      for (int k = 0; k < order.size(); k++) {
+                          TLRPC.MessageEntity e = order.get(k);
+                          if (e.offset == i) {
+                              String t = tag(e, true);
+                              if (t != null) sb.append(t);
+                          }
+                      }
+                      char ch = text.charAt(i);
+                      if (ch == '&') sb.append("&amp;");
+                      else if (ch == '<') sb.append("&lt;");
+                      else if (ch == '>') sb.append("&gt;");
+                      else if (ch == '\n') sb.append("<br>");
+                      else sb.append(ch);
+                  }
+                  return sb.toString();
+              }
+
+              // ------------------------------------------------------------------ вставка
+
+              /** EditTextCaption: перехват «Вставить». true = вставили сами, с форматированием */
+              public static boolean pasteInto(EditText et) {
+                  try {
+                      if (et == null || !enabled()) return false;
+                      Context ctx = ApplicationLoader.applicationContext;
+                      ClipboardManager cm = (ClipboardManager) ctx.getSystemService(Context.CLIPBOARD_SERVICE);
+                      if (cm == null || !cm.hasPrimaryClip()) return false;
+                      ClipData d = cm.getPrimaryClip();
+                      if (d == null || d.getItemCount() == 0) return false;
+                      CharSequence t = d.getItemAt(0).coerceToText(ctx);
+                      if (t == null) return false;
+                      String plain = t.toString();
+
+                      String lp = lastPlain;
+                      String le = lastEntities;
+                      if (lp == null) {
+                          SharedPreferences p = prefs();
+                          if (p != null) {
+                              lp = p.getString("plain", null);
+                              le = p.getString("ents", null);
+                          }
+                      }
+                      if (lp == null || le == null || !plain.equals(lp)) return false;
+                      ArrayList<TLRPC.MessageEntity> ents = decode(le);
+                      if (ents == null || ents.isEmpty()) return false;
+
+                      CharSequence styled = style(plain, ents, et);
+                      if (styled == null) return false;
+
+                      Editable ed = et.getText();
+                      int ss = Math.max(0, et.getSelectionStart());
+                      int se = Math.max(0, et.getSelectionEnd());
+                      int a = Math.min(ss, se);
+                      int b = Math.max(ss, se);
+                      ed.replace(a, b, styled);
+                      et.setSelection(Math.min(ed.length(), a + styled.length()));
+                      return true;
+                  } catch (Throwable t) {
+                      return false;
+                  }
+              }
+
+              private static CharSequence style(String plain, List<TLRPC.MessageEntity> ents, EditText et) {
+                  ArrayList<TLRPC.MessageEntity> list = new ArrayList<>(ents);
+                  SpannableStringBuilder sb = new SpannableStringBuilder(plain);
+                  boolean done = false;
+
+                  // 1) жирный, курсив, моно, спойлер, цитаты...
+                  try {
+                      for (Method m : MediaDataController.class.getDeclaredMethods()) {
+                          if (!m.getName().equals("addTextStyleRuns") || !Modifier.isStatic(m.getModifiers())) continue;
+                          Class<?>[] pt = m.getParameterTypes();
+                          if (pt.length < 3 || pt.length > 4) continue;
+                          if (!pt[0].isAssignableFrom(ArrayList.class) || pt[1] != CharSequence.class || pt[2] != Spannable.class) continue;
+                          if (pt.length == 4 && pt[3] != int.class) continue;
+                          m.setAccessible(true);
+                          if (pt.length == 4) {
+                              m.invoke(null, list, plain, sb, -1);
+                          } else {
+                              m.invoke(null, list, plain, sb);
+                          }
+                          done = true;
+                          break;
+                      }
+                  } catch (Throwable ignore) { }
+
+                  // 1b) цитата, если addTextStyleRuns её не поставил
+                  try {
+                      for (TLRPC.MessageEntity e : list) {
+                          if (!e.getClass().getSimpleName().contains("Blockquote")) continue;
+                          int s = e.offset;
+                          int t = Math.min(sb.length(), e.offset + e.length);
+                          if (t <= s) continue;
+                          boolean has = false;
+                          for (Object span : sb.getSpans(s, t, Object.class)) {
+                              if (span.getClass().getName().contains("Quote")) {
+                                  has = true;
+                                  break;
+                              }
+                          }
+                          if (has) continue;
+                          boolean collapsed = false;
+                          try {
+                              collapsed = e.getClass().getField("collapsed").getBoolean(e);
+                          } catch (Throwable ignore) { }
+                          Class<?> q = Class.forName("org.telegram.ui.Components.QuoteSpan");
+                          for (Method m : q.getDeclaredMethods()) {
+                              Class<?>[] pt = m.getParameterTypes();
+                              if (m.getName().equals("putQuote") && Modifier.isStatic(m.getModifiers())
+                                      && pt.length == 4 && pt[0] == Spannable.class && pt[1] == int.class && pt[2] == int.class && pt[3] == boolean.class) {
+                                  m.setAccessible(true);
+                                  m.invoke(null, sb, s, t, collapsed);
+                                  done = true;
+                                  break;
+                              }
+                          }
+                      }
+                  } catch (Throwable ignore) { }
+
+                  // 2) премиум (анимированные) эмодзи
+                  CharSequence out = sb;
+                  try {
+                      for (Method m : MediaDataController.class.getDeclaredMethods()) {
+                          if (!m.getName().equals("addAnimatedEmojiSpans") || !Modifier.isStatic(m.getModifiers())) continue;
+                          Class<?>[] pt = m.getParameterTypes();
+                          if (pt.length != 3 || !pt[0].isAssignableFrom(ArrayList.class) || pt[1] != CharSequence.class) continue;
+                          m.setAccessible(true);
+                          Paint.FontMetricsInt fm = et.getPaint().getFontMetricsInt();
+                          Object r = m.invoke(null, list, sb, fm);
+                          if (r instanceof CharSequence) {
+                              out = (CharSequence) r;
+                          }
+                          done = true;
+                          break;
+                      }
+                  } catch (Throwable ignore) { }
+
+                  return done ? out : null;
+              }
+          }
+          JAVA
+
+          # ======================================================== экран «Автоответчик»
+          cat > "$U/AutoReplySettingsActivity.java" <<'JAVA'
+          package org.telegram.ui;
+
+          import android.content.Context;
+          import android.text.Editable;
+          import android.text.InputType;
+          import android.text.TextWatcher;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.EditText;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+
+          import org.telegram.messenger.AndroidUtilities;
+          import org.telegram.messenger.AutoReply;
+          import org.telegram.messenger.R;
+          import org.telegram.ui.ActionBar.ActionBar;
+          import org.telegram.ui.ActionBar.AlertDialog;
+          import org.telegram.ui.ActionBar.BaseFragment;
+          import org.telegram.ui.ActionBar.Theme;
+          import org.telegram.ui.Cells.HeaderCell;
+          import org.telegram.ui.Cells.TextCheckCell;
+          import org.telegram.ui.Cells.TextSettingsCell;
+
+          public class AutoReplySettingsActivity extends BaseFragment {
+
+              private TextSettingsCell intervalCell;
+
+              @Override
+              public View createView(final Context context) {
+                  actionBar.setBackButtonImage(R.drawable.ic_ab_back);
+                  actionBar.setAllowOverlayTitle(true);
+                  actionBar.setTitle("Автоответчик");
+                  actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
+                      @Override
+                      public void onItemClick(int id) {
+                          if (id == -1) {
+                              finishFragment();
+                          }
+                      }
+                  });
+
+                  FrameLayout root = new FrameLayout(context);
+                  root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
+                  fragmentView = root;
+
+                  ScrollView scroll = new ScrollView(context);
+                  root.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+                  LinearLayout list = new LinearLayout(context);
+                  list.setOrientation(LinearLayout.VERTICAL);
+                  scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  addHeader(list, context, "Автоответчик");
+                  addSwitch(list, context, "Включить автоответчик", AutoReply.KEY_ENABLED, false);
+                  addNote(list, context, "Отвечает на личные сообщения, пока приложение свёрнуто или закрыто (то есть ты офлайн). Боты, группы и каналы пропускаются.");
+
+                  addHeader(list, context, "Текст ответа");
+                  LinearLayout box = new LinearLayout(context);
+                  box.setOrientation(LinearLayout.VERTICAL);
+                  box.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  EditText edit = new EditText(context);
+                  edit.setText(AutoReply.text());
+                  edit.setHint(AutoReply.DEFAULT_TEXT);
+                  edit.setTextSize(16);
+                  edit.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                  edit.setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+                  edit.setBackground(null);
+                  edit.setGravity(Gravity.TOP | Gravity.START);
+                  edit.setMinLines(3);
+                  edit.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(12), AndroidUtilities.dp(21), AndroidUtilities.dp(12));
+                  edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+                  edit.addTextChangedListener(new TextWatcher() {
+                      @Override
+                      public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+
+                      @Override
+                      public void onTextChanged(CharSequence s, int start, int before, int count) { }
+
+                      @Override
+                      public void afterTextChanged(Editable s) {
+                          AutoReply.setText(s.toString());
+                      }
+                  });
+                  box.addView(edit, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                  list.addView(box, matchWrap());
+                  addNote(list, context, "Этот текст уходит от твоего имени. Пустой текст — автоответ не отправляется.");
+
+                  addHeader(list, context, "Условия");
+                  addSwitch(list, context, "Отвечать только контактам", AutoReply.KEY_CONTACTS, true);
+                  addSwitch(list, context, "Отвечать, даже когда я в приложении", AutoReply.KEY_ONLINE, true);
+                  intervalCell = new TextSettingsCell(context);
+                  intervalCell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  intervalCell.setOnClickListener(v -> {
+                      AlertDialog.Builder b = new AlertDialog.Builder(context);
+                      b.setTitle("Не чаще одного раза в");
+                      b.setItems(AutoReply.COOLDOWN_TITLES, (dialog, which) -> {
+                          AutoReply.setCooldown(which);
+                          updateInterval();
+                      });
+                      showDialog(b.create());
+                  });
+                  list.addView(intervalCell, matchWrap());
+                  updateInterval();
+                  addNote(list, context, "Один собеседник получает автоответ не чаще выбранного интервала. Старые сообщения при догрузке не отвечаются.");
+
+                  return fragmentView;
+              }
+
+              private void updateInterval() {
+                  intervalCell.setTextAndValue("Не чаще одного раза в", AutoReply.COOLDOWN_TITLES[AutoReply.cooldown()], false);
+              }
+
+              private LinearLayout.LayoutParams matchWrap() {
+                  return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+              }
+
+              private void addHeader(LinearLayout list, Context context, String title) {
+                  HeaderCell header = new HeaderCell(context);
+                  header.setText(title);
+                  header.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  list.addView(header, matchWrap());
+              }
+
+              private void addSwitch(LinearLayout list, Context context, String title, final String key, boolean divider) {
+                  final TextCheckCell cell = new TextCheckCell(context);
+                  cell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  cell.setTextAndCheck(title, AutoReply.get(key), divider);
+                  cell.setOnClickListener(v -> {
+                      boolean value = !AutoReply.get(key);
+                      AutoReply.set(key, value);
+                      cell.setChecked(value);
+                  });
+                  list.addView(cell, matchWrap());
+              }
+
+              private void addNote(LinearLayout list, Context context, String text) {
+                  TextView note = new TextView(context);
+                  note.setText(text);
+                  note.setTextSize(14);
+                  note.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+                  note.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(10), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
+                  list.addView(note, matchWrap());
+              }
+          }
+          JAVA
+
+          # ======================================================== патчи исходников
+          python3 - <<'PY'
+          import re, os
+
+          SRC = "TMessagesProj/src/main/java/org/telegram/"
+          report = []
+          def ok(m): print(m); report.append("OK   " + m)
+          def warn(m): print("::warning::" + m); report.append("FAIL " + m)
+          def read(p):
+              try:
+                  return open(p, encoding="utf-8").read()
+              except FileNotFoundError:
+                  return ""
+          def write(p, s):
+              open(p, "w", encoding="utf-8").write(s)
+
+          # ---------- 1. AutoReply: вызов отправки под сигнатуру prepareSendingText этой версии
+          def split_params(sig):
+              parts, depth, cur = [], 0, ""
+              for ch in sig:
+                  if ch in "<(":
+                      depth += 1
+                  elif ch in ">)":
+                      depth -= 1
+                  if ch == "," and depth == 0:
+                      parts.append(cur.strip()); cur = ""
+                  else:
+                      cur += ch
+              if cur.strip():
+                  parts.append(cur.strip())
+              return parts
+
+          sh = read(SRC + "messenger/SendMessagesHelper.java")
+          best = None
+          for m in re.finditer(r'public\s+static\s+void\s+prepareSendingText\s*\(([^)]*)\)', sh):
+              params = [p.replace("final ", "").strip() for p in split_params(m.group(1))]
+              if len(params) >= 3 and params[0].split()[0] == "AccountInstance" and params[1].split()[0] == "String" and params[2].split()[0] == "long":
+                  if best is None or len(params) < len(best):
+                      best = params
+          ar_path = SRC + "messenger/AutoReply.java"
+          ar = read(ar_path)
+          if best:
+              args = []
+              for i, p in enumerate(best):
+                  toks = p.split()
+                  typ, name = toks[0], toks[-1]
+                  if i == 0: args.append("AccountInstance.getInstance(acc)")
+                  elif i == 1: args.append("text")
+                  elif i == 2: args.append("dialogId")
+                  elif typ == "boolean": args.append("true" if "notify" in name.lower() else "false")
+                  elif typ == "long": args.append("0L")
+                  elif typ == "int": args.append("0")
+                  else: args.append("null")
+              call = "SendMessagesHelper.prepareSendingText(%s);" % ", ".join(args)
+              write(ar_path, ar.replace("/*@SEND@*/", call))
+              ok("AutoReply: отправка через " + call)
+          else:
+              write(ar_path, ar.replace("/*@SEND@*/", "// prepareSendingText не найден"))
+              warn("SendMessagesHelper.prepareSendingText не найден, автоответ не сможет отправиться")
+
+          # ---------- 2. MessagesController: хуки
+          mc_path = SRC + "messenger/MessagesController.java"
+          mc = read(mc_path)
+          if "AutoReply.filterUpdates" in mc:
+              ok("MessagesController: хуки автоответчика уже стоят")
+          else:
+              pat = re.compile(r'(\bvoid\s+processUpdateArray\s*\(\s*(?:final\s+)?(?:java\.util\.)?ArrayList<TLRPC\.Update>\s+(\w+)\s*,[^{;]*\)\s*\{)', re.S)
+              mc, n1 = pat.subn(lambda m: m.group(1) + "\n        org.telegram.messenger.AutoReply.filterUpdates(currentAccount, %s);" % m.group(2), mc)
+              pat2 = re.compile(r'(\bvoid\s+processUpdates\s*\(\s*(?:final\s+)?TLRPC\.Updates\s+(\w+)\s*,[^{;]*\)\s*\{)', re.S)
+              mc, n2 = pat2.subn(lambda m: m.group(1) + "\n        org.telegram.messenger.AutoReply.onUpdates(currentAccount, %s);" % m.group(2), mc)
+              if n1 or n2:
+                  write(mc_path, mc)
+              (ok if n1 else warn)("MessagesController.processUpdateArray: пропатчено %d" % n1)
+              (ok if n2 else warn)("MessagesController.processUpdates: пропатчено %d (короткие сообщения)" % n2)
+
+          # ---------- 3. GhostMode: автоответ не должен слать «прочитано»
+          gm_path = SRC + "messenger/GhostMode.java"
+          gm = read(gm_path)
+          anchor = "private static void onAction(String key) {"
+          if not gm:
+              warn("GhostMode.java не найден, защита «прочитано» при автоответе не поставлена")
+          elif "AutoReply.suppressed" in gm:
+              ok("GhostMode: защита уже стоит")
+          elif anchor in gm:
+              write(gm_path, gm.replace(anchor, anchor + "\n        if (org.telegram.messenger.AutoReply.suppressed(key)) {\n            return;\n        }", 1))
+              ok("GhostMode: автоответ не триггерит «читать при действиях»")
+          else:
+              warn("GhostMode: не нашёл onAction")
+
+          # ---------- 4. Хаб «Настройки FluxGram»: пункты «Автоответчик» и «Копировать с форматированием»
+          hp = SRC + "ui/FluxHubActivity.java"
+          h = read(hp)
+          hub_done = False
+          if not h:
+              warn("FluxHubActivity.java не найден, пункты в настройки не добавлены")
+          elif "AutoReplySettingsActivity" in h:
+              ok("FluxHub: пункты уже добавлены"); hub_done = True
+          else:
+              m = re.search(r'(?m)^([ \t]*)return fragmentView;', h)
+              if not m:
+                  warn("FluxHub: не нашёл return fragmentView")
+              else:
+                  ind = m.group(1)
+                  lp = "new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)"
+                  block = (
+                      "TextSettingsCell autoReply = new TextSettingsCell(context);\n"
+                      "autoReply.setText(\"Автоответчик\", true);\n"
+                      "autoReply.setOnClickListener(v -> presentFragment(new AutoReplySettingsActivity()));\n"
+                      "c.addView(autoReply, " + lp + ");\n\n"
+                      "final org.telegram.ui.Cells.TextCheckCell copyKeep = new org.telegram.ui.Cells.TextCheckCell(context);\n"
+                      "copyKeep.setTextAndCheck(\"Копировать с форматированием\", org.telegram.messenger.FluxClip.enabled(), false);\n"
+                      "copyKeep.setOnClickListener(v -> {\n"
+                      "    boolean val = !org.telegram.messenger.FluxClip.enabled();\n"
+                      "    org.telegram.messenger.FluxClip.setEnabled(val);\n"
+                      "    copyKeep.setChecked(val);\n"
+                      "});\n"
+                      "c.addView(copyKeep, " + lp + ");\n\n"
+                  )
+                  block = "".join((ind + l if l.strip() else l) + "\n" for l in block.rstrip("\n").split("\n")) + "\n"
+                  h = h[:m.start()] + block + h[m.start():]
+                  h = h.replace('spy.setText("Шпион", false);', 'spy.setText("Шпион", true);')
+                  write(hp, h)
+                  hub_done = True
+                  ok("FluxHub: добавлены «Автоответчик» и переключатель «Копировать с форматированием»")
+          if not hub_done:
+              p = SRC + "ui/AutoReplySettingsActivity.java"
+              if os.path.exists(p):
+                  os.remove(p)
+                  warn("Экран автоответчика удалён: до него не добраться без хаба")
+
+          # ---------- 5. Копирование: AndroidUtilities.addToClipboard
+          au_path = SRC + "messenger/AndroidUtilities.java"
+          au = read(au_path)
+          if "FluxClip.put" in au:
+              ok("AndroidUtilities: хук копирования уже стоит")
+          else:
+              m = re.search(r'public\s+static\s+(boolean|void)\s+addToClipboard\s*\(\s*CharSequence\s+(\w+)\s*\)\s*\{', au)
+              if not m:
+                  warn("AndroidUtilities.addToClipboard(CharSequence) не найден, форматирование при копировании не работает")
+              else:
+                  ret = " true" if m.group(1) == "boolean" else ""
+                  hook = "\n        if (org.telegram.messenger.FluxClip.put(%s)) {\n            return%s;\n        }" % (m.group(2), ret)
+                  write(au_path, au[:m.end()] + hook + au[m.end():])
+                  ok("AndroidUtilities.addToClipboard: хук FluxClip.put")
+
+          # ---------- 6. Копирование: источник из меню сообщения
+          ca_path = SRC + "ui/ChatActivity.java"
+          ca = read(ca_path)
+          if "FluxClip.setSource" in ca:
+              ok("ChatActivity: источник копирования уже подключён")
+          elif not re.search(r'\bMessageObject\s+selectedObject\b', ca):
+              warn("ChatActivity: нет поля selectedObject, меню «Копировать» не подключено")
+          else:
+              m = re.search(r'void\s+processSelectedOption\s*\(\s*int\s+\w+\s*\)\s*\{', ca)
+              if not m:
+                  warn("ChatActivity.processSelectedOption не найден, меню «Копировать» не подключено")
+              else:
+                  write(ca_path, ca[:m.end()] + "\n        org.telegram.messenger.FluxClip.setSource(selectedObject);" + ca[m.end():])
+                  ok("ChatActivity.processSelectedOption: источник для копирования")
+
+          # ---------- 7. Копирование выделенного фрагмента (TextSelectionHelper)
+          import glob
+          tsh = glob.glob(SRC + "ui/**/TextSelectionHelper.java", recursive=True)
+          if not tsh:
+              warn("TextSelectionHelper.java не найден, копирование выделенного фрагмента останется обычным")
+          else:
+              p = tsh[0]
+              s = read(p)
+              if "FluxClip.hint" in s:
+                  ok("TextSelectionHelper: уже подключён")
+              else:
+                  needle = "AndroidUtilities.addToClipboard("
+                  out, i, n = [], 0, 0
+                  while True:
+                      j = s.find(needle, i)
+                      if j < 0:
+                          out.append(s[i:]); break
+                      k = j + len(needle); depth = 1; q = k
+                      while q < len(s) and depth > 0:
+                          ch = s[q]
+                          if ch == '"':
+                              q += 1
+                              while q < len(s) and s[q] != '"':
+                                  if s[q] == '\\': q += 1
+                                  q += 1
+                          elif ch == '(':
+                              depth += 1
+                          elif ch == ')':
+                              depth -= 1
+                          q += 1
+                      inner = s[k:q - 1]
+                      out.append(s[i:k]); out.append("org.telegram.messenger.FluxClip.hint(this, " + inner + "))")
+                      i = q; n += 1
+                  if n:
+                      write(p, "".join(out))
+                      ok("TextSelectionHelper: подключено вызовов копирования: %d" % n)
+                  else:
+                      warn("TextSelectionHelper: вызовов addToClipboard не найдено")
+
+          # ---------- 8. Вставка: EditTextCaption
+          et_path = SRC + "ui/Components/EditTextCaption.java"
+          et = read(et_path)
+          if "FluxClip.pasteInto" in et:
+              ok("EditTextCaption: перехват вставки уже стоит")
+          elif not et:
+              warn("EditTextCaption.java не найден, вставка с форматированием не работает")
+          else:
+              m = re.search(r'public\s+boolean\s+onTextContextMenuItem\s*\(\s*(?:final\s+)?int\s+(\w+)\s*\)\s*\{', et)
+              if m:
+                  hook = "\n        if (%s == android.R.id.paste && org.telegram.messenger.FluxClip.pasteInto(this)) {\n            return true;\n        }" % m.group(1)
+                  write(et_path, et[:m.end()] + hook + et[m.end():])
+                  ok("EditTextCaption.onTextContextMenuItem: перехват «Вставить»")
+              else:
+                  c = re.search(r'public\s+class\s+EditTextCaption\b[^{]*\{', et)
+                  if not c:
+                      warn("EditTextCaption: не нашёл объявление класса")
+                  else:
+                      add = ("\n    @Override\n    public boolean onTextContextMenuItem(int id) {\n"
+                             "        if (id == android.R.id.paste && org.telegram.messenger.FluxClip.pasteInto(this)) {\n"
+                             "            return true;\n        }\n"
+                             "        return super.onTextContextMenuItem(id);\n    }\n")
+                      write(et_path, et[:c.end()] + add + et[c.end():])
+                      ok("EditTextCaption: добавлен override onTextContextMenuItem")
+
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
+              f.write("## FluxGram: автоответчик и копирование с форматированием\n```\n" + "\n".join(report) + "\n```\n")
           PY
 
       - name: Нативные библиотеки (libvpx, ffmpeg, boringssl)
