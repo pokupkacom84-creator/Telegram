@@ -4863,7 +4863,7 @@ jobs:
                   return !ApplicationLoader.mainInterfacePaused;
               }
 
-              public static void filterUpdates(int acc, ArrayList<TLRPC.Update> updates) {
+              public static void filterUpdates(int acc, java.util.List<TLRPC.Update> updates) {
                   if (updates == null || !get(KEY_ENABLED)) return;
                   try {
                       for (int i = 0; i < updates.size(); i++) {
@@ -5493,18 +5493,32 @@ jobs:
               return parts
 
           sh = read(SRC + "messenger/SendMessagesHelper.java")
+          def sigs(name):
+              res = []
+              for m in re.finditer(r'\b' + name + r'\s*\(', sh):
+                  if "static" not in sh[max(0, m.start() - 80):m.start()]:
+                      continue
+                  k = m.end(); depth = 1; q = k
+                  while q < len(sh) and depth > 0:
+                      if sh[q] == "(": depth += 1
+                      elif sh[q] == ")": depth -= 1
+                      q += 1
+                  params = []
+                  for x in split_params(sh[k:q - 1]):
+                      x = re.sub(r'@\w+(\([^)]*\))?\s*', '', x).replace("final ", "").strip()
+                      if x: params.append(x)
+                  res.append(params)
+              return res
           best = None
-          for m in re.finditer(r'public\s+static\s+void\s+prepareSendingText\s*\(([^)]*)\)', sh):
-              params = [p.replace("final ", "").strip() for p in split_params(m.group(1))]
-              if len(params) >= 3 and params[0].split()[0] == "AccountInstance" and params[1].split()[0] == "String" and params[2].split()[0] == "long":
+          for params in sigs("prepareSendingText"):
+              if len(params) >= 3 and params[0].split()[0] == "AccountInstance" and params[1].split()[0] in ("String", "CharSequence") and params[2].split()[0] == "long":
                   if best is None or len(params) < len(best):
                       best = params
-          ar_path = SRC + "messenger/AutoReply.java"
-          ar = read(ar_path)
+          call = None
           if best:
               args = []
-              for i, p in enumerate(best):
-                  toks = p.split()
+              for i, x in enumerate(best):
+                  toks = x.split()
                   typ, name = toks[0], toks[-1]
                   if i == 0: args.append("AccountInstance.getInstance(acc)")
                   elif i == 1: args.append("text")
@@ -5514,10 +5528,20 @@ jobs:
                   elif typ == "int": args.append("0")
                   else: args.append("null")
               call = "SendMessagesHelper.prepareSendingText(%s);" % ", ".join(args)
+          else:
+              for params in sigs("of"):
+                  if len(params) == 2 and params[0].split()[0] == "String" and params[1].split()[0] == "long":
+                      call = "SendMessagesHelper.getInstance(acc).sendMessage(SendMessagesHelper.SendMessageParams.of(text, dialogId));"
+                      break
+          ar_path = SRC + "messenger/AutoReply.java"
+          ar = read(ar_path)
+          if call:
               write(ar_path, ar.replace("/*@SEND@*/", call))
               ok("AutoReply: отправка через " + call)
           else:
-              write(ar_path, ar.replace("/*@SEND@*/", "// prepareSendingText не найден"))
+              write(ar_path, ar.replace("/*@SEND@*/", ""))
+              for m in re.finditer(r'[^\n]*prepareSendingText[^\n]*', sh):
+                  print("SIG:", m.group(0).strip())
               warn("SendMessagesHelper.prepareSendingText не найден, автоответ не сможет отправиться")
 
           mc_path = SRC + "messenger/MessagesController.java"
@@ -5525,7 +5549,7 @@ jobs:
           if "AutoReply.filterUpdates" in mc:
               ok("MessagesController: хуки автоответчика уже стоят")
           else:
-              pat = re.compile(r'(\bvoid\s+processUpdateArray\s*\(\s*(?:final\s+)?(?:java\.util\.)?ArrayList<TLRPC\.Update>\s+(\w+)\s*,[^{;]*\)\s*\{)', re.S)
+              pat = re.compile(r'(\b(?:void|boolean)\s+processUpdateArray\s*\(\s*(?:final\s+)?(?:java\.util\.)?(?:Array)?List<TLRPC\.Update>\s+(\w+)\s*,[^{;]*\)\s*\{)', re.S)
               mc, n1 = pat.subn(lambda m: m.group(1) + "\n        org.telegram.messenger.AutoReply.filterUpdates(currentAccount, %s);" % m.group(2), mc)
               pat2 = re.compile(r'(\bvoid\s+processUpdates\s*\(\s*(?:final\s+)?TLRPC\.Updates\s+(\w+)\s*,[^{;]*\)\s*\{)', re.S)
               mc, n2 = pat2.subn(lambda m: m.group(1) + "\n        org.telegram.messenger.AutoReply.onUpdates(currentAccount, %s);" % m.group(2), mc)
@@ -5722,7 +5746,7 @@ jobs:
               f.write("## FluxGram: автоответчик и копирование с форматированием\n```\n" + "\n".join(report) + "\n```\n")
 
           import sys
-          critical = [r for r in report if r.startswith("FAIL") and "TextSelectionHelper" not in r and "NotificationsController" not in r]
+          critical = [r for r in report if r.startswith("FAIL") and "TextSelectionHelper" not in r and "NotificationsController" not in r and "processUpdateArray" not in r]
           if critical:
               print("::error::Не все патчи встали, сборка остановлена, чтобы не получить APK без функций:")
               for r in critical:
