@@ -72,6 +72,14 @@ on:
         description: "FluxGram: время у сообщений с секундами"
         type: boolean
         default: true
+      auto_proxy:
+        description: "FluxGram: автопрокси MTProto из GitHub (включать сразу и обновлять)"
+        type: boolean
+        default: true
+      proxy_sources:
+        description: "FluxGram: источники прокси (ссылки через пробел или запятую)"
+        type: string
+        default: "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt https://raw.githubusercontent.com/0xRadikal/Free-Telegram-Proxy/main/top100.txt https://raw.githubusercontent.com/shablin/mtproto-proxy/main/data/valid_proxy.txt"
 
 env:
   APP_NAME: FluxGram
@@ -92,6 +100,8 @@ env:
   HIDE_OWN_PHONE: ${{ inputs.hide_own_phone }}
   PROFILE_DETAILS: ${{ inputs.profile_details }}
   MESSAGE_SECONDS: ${{ inputs.message_seconds }}
+  AUTO_PROXY: ${{ inputs.auto_proxy }}
+  PROXY_SOURCES: ${{ inputs.proxy_sources }}
 
 defaults:
   run:
@@ -5878,6 +5888,1106 @@ jobs:
               sys.exit(1)
           PY
 
+      - name: Автопрокси MTProto из GitHub (FluxProxy + экран в хабе)
+        run: |
+          python3 - <<'PY'
+          DEFAULT_URLS = ['https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt', 'https://raw.githubusercontent.com/0xRadikal/Free-Telegram-Proxy/main/top100.txt', 'https://raw.githubusercontent.com/shablin/mtproto-proxy/main/data/valid_proxy.txt']
+          PROXY_JAVA = r"""package org.telegram.messenger;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.net.Uri;
+          import android.os.SystemClock;
+
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import org.telegram.tgnet.ConnectionsManager;
+
+          import java.io.ByteArrayOutputStream;
+          import java.io.InputStream;
+          import java.lang.reflect.Field;
+          import java.lang.reflect.InvocationHandler;
+          import java.lang.reflect.Method;
+          import java.lang.reflect.Proxy;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.Comparator;
+          import java.util.HashSet;
+          import java.util.LinkedHashMap;
+          import java.util.List;
+          import java.util.Set;
+          import java.util.concurrent.atomic.AtomicBoolean;
+          import java.util.concurrent.atomic.AtomicInteger;
+
+          public class FluxProxy {
+
+              public static final String KEY_ENABLED = "fp_enabled";
+              public static final String KEY_WATCHDOG = "fp_watchdog";
+              public static final String KEY_SOURCES = "fp_sources";
+              public static final String KEY_INTERVAL = "fp_interval";
+              private static final String KEY_LAST = "fp_last";
+              private static final String KEY_CACHE = "fp_cache";
+              private static final String KEY_MANAGED = "fp_managed";
+              private static final String KEY_STATUS = "fp_status";
+
+              public static final String DEFAULT_SOURCES = @SOURCES@;
+              private static final boolean DEFAULT_ENABLED = @AUTO@;
+
+              public static final int[] INTERVAL_HOURS = {1, 3, 6, 12, 24};
+              public static final String[] INTERVAL_TITLES = {"1 час", "3 часа", "6 часов", "12 часов", "1 сутки"};
+
+              private static final int MAX_PROBE = 24;
+              private static final int KEEP = 3;
+              private static final int MAX_ENTRIES = 3000;
+              private static final int MAX_BYTES = 3 * 1024 * 1024;
+              private static final long PROBE_TIMEOUT_MS = 12000L;
+              private static final long BAD_STATE_MS = 20000L;
+              private static final long ROTATE_GAP_MS = 45000L;
+              private static final long TICK_MS = 15L * 60L * 1000L;
+
+              private static final Object LOCK = new Object();
+              private static boolean started;
+              private static boolean running;
+              private static long badSince;
+              private static long lastRotate;
+              private static volatile Runnable listener;
+              private static volatile List<Entry> ranked = new ArrayList<>();
+              private static volatile int rankIndex;
+              private static volatile long currentPing = -1;
+              private static volatile String currentKey = "";
+
+              private interface PingCb {
+                  void done(long ping);
+              }
+
+              static final class Entry {
+                  final String host;
+                  final int port;
+                  final String secret;
+                  long ping = -1;
+
+                  Entry(String host, int port, String secret) {
+                      this.host = host;
+                      this.port = port;
+                      this.secret = secret;
+                  }
+
+                  String key() {
+                      return host.toLowerCase() + ":" + port;
+                  }
+              }
+
+              private static SharedPreferences prefs() {
+                  Context c = ApplicationLoader.applicationContext;
+                  return c == null ? null : c.getSharedPreferences("flux_proxy", Context.MODE_PRIVATE);
+              }
+
+              public static boolean get(String key) {
+                  SharedPreferences p = prefs();
+                  boolean def = KEY_ENABLED.equals(key) ? DEFAULT_ENABLED : true;
+                  return p == null ? def : p.getBoolean(key, def);
+              }
+
+              public static void set(String key, boolean value) {
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putBoolean(key, value).apply();
+                  }
+                  if (KEY_ENABLED.equals(key) && value) {
+                      refresh(true);
+                  }
+              }
+
+              public static boolean enabled() {
+                  return get(KEY_ENABLED);
+              }
+
+              public static int interval() {
+                  SharedPreferences p = prefs();
+                  int i = p == null ? 2 : p.getInt(KEY_INTERVAL, 2);
+                  return Math.max(0, Math.min(INTERVAL_HOURS.length - 1, i));
+              }
+
+              public static void setInterval(int index) {
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putInt(KEY_INTERVAL, index).apply();
+                  }
+              }
+
+              public static String sourcesText() {
+                  SharedPreferences p = prefs();
+                  return p == null ? DEFAULT_SOURCES : p.getString(KEY_SOURCES, DEFAULT_SOURCES);
+              }
+
+              public static void setSourcesText(String value) {
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putString(KEY_SOURCES, value == null ? "" : value).apply();
+                  }
+              }
+
+              private static List<String> sources() {
+                  ArrayList<String> out = new ArrayList<>();
+                  String raw = sourcesText();
+                  if (raw == null) {
+                      return out;
+                  }
+                  for (String s : raw.split("[\\s,]+")) {
+                      if (s.startsWith("http://") || s.startsWith("https://")) {
+                          out.add(s);
+                      }
+                  }
+                  return out;
+              }
+
+              public static String status() {
+                  SharedPreferences p = prefs();
+                  String s = p == null ? "" : p.getString(KEY_STATUS, "");
+                  return s == null || s.length() == 0 ? "Ещё не обновлялось" : s;
+              }
+
+              private static void setStatus(String s) {
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putString(KEY_STATUS, s).apply();
+                  }
+                  notifyListener();
+              }
+
+              public static void setListener(Runnable r) {
+                  listener = r;
+              }
+
+              private static void notifyListener() {
+                  final Runnable r = listener;
+                  if (r != null) {
+                      AndroidUtilities.runOnUIThread(r);
+                  }
+              }
+
+              public static boolean isRunning() {
+                  synchronized (LOCK) {
+                      return running;
+                  }
+              }
+
+              private static boolean due() {
+                  SharedPreferences p = prefs();
+                  if (p == null) {
+                      return false;
+                  }
+                  long last = p.getLong(KEY_LAST, 0L);
+                  return System.currentTimeMillis() - last > INTERVAL_HOURS[interval()] * 3600L * 1000L;
+              }
+
+              private static boolean proxyEnabled() {
+                  try {
+                      return MessagesController.getGlobalMainSettings().getBoolean("proxy_enabled", false);
+                  } catch (Throwable t) {
+                      return false;
+                  }
+              }
+
+              private static int intConst(String name, int def) {
+                  try {
+                      return ConnectionsManager.class.getField(name).getInt(null);
+                  } catch (Throwable t) {
+                      return def;
+                  }
+              }
+
+              private static int state() {
+                  try {
+                      return ConnectionsManager.getInstance(UserConfig.selectedAccount).getConnectionState();
+                  } catch (Throwable t) {
+                      return -1;
+                  }
+              }
+
+              private static boolean connected() {
+                  int st = state();
+                  return st == intConst("ConnectionStateConnected", 3) || st == intConst("ConnectionStateUpdating", 5);
+              }
+
+              private static boolean stuckConnecting() {
+                  int st = state();
+                  return st == intConst("ConnectionStateConnecting", 1) || st == intConst("ConnectionStateConnectingToProxy", 4);
+              }
+
+              private static final NotificationCenter.NotificationCenterDelegate OBS = new NotificationCenter.NotificationCenterDelegate() {
+                  @Override
+                  public void didReceivedNotification(int id, int account, Object... args) {
+                      if (id == NotificationCenter.didUpdateConnectionState) {
+                          onState();
+                      }
+                  }
+              };
+
+              private static final Runnable TICK = new Runnable() {
+                  @Override
+                  public void run() {
+                      try {
+                          if (enabled() && due() && !isRunning()) {
+                              refresh(false);
+                          }
+                      } catch (Throwable t) {
+                          FileLog.e(t);
+                      }
+                      AndroidUtilities.runOnUIThread(this, TICK_MS);
+                  }
+              };
+
+              public static void startup() {
+                  synchronized (LOCK) {
+                      if (started) {
+                          return;
+                      }
+                      started = true;
+                  }
+                  if (ApplicationLoader.applicationContext == null) {
+                      synchronized (LOCK) {
+                          started = false;
+                      }
+                      return;
+                  }
+                  try {
+                      NotificationCenter.getGlobalInstance().addObserver(OBS, NotificationCenter.didUpdateConnectionState);
+                      for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+                          NotificationCenter.getInstance(a).addObserver(OBS, NotificationCenter.didUpdateConnectionState);
+                      }
+                  } catch (Throwable t) {
+                      FileLog.e(t);
+                  }
+                  if (enabled()) {
+                      boolean off = !proxyEnabled();
+                      if (off || due()) {
+                          refresh(off);
+                      }
+                  }
+                  AndroidUtilities.runOnUIThread(TICK, TICK_MS);
+              }
+
+              private static void onState() {
+                  try {
+                      if (!enabled() || !get(KEY_WATCHDOG)) {
+                          return;
+                      }
+                      if (!stuckConnecting()) {
+                          badSince = 0;
+                          return;
+                      }
+                      if (badSince != 0) {
+                          return;
+                      }
+                      final long stamp = SystemClock.elapsedRealtime();
+                      badSince = stamp;
+                      AndroidUtilities.runOnUIThread(new Runnable() {
+                          @Override
+                          public void run() {
+                              if (badSince == stamp && stuckConnecting()) {
+                                  badSince = 0;
+                                  rotate();
+                              }
+                          }
+                      }, BAD_STATE_MS);
+                  } catch (Throwable t) {
+                      FileLog.e(t);
+                  }
+              }
+
+              private static void rotate() {
+                  long now = SystemClock.elapsedRealtime();
+                  if (lastRotate != 0 && now - lastRotate < ROTATE_GAP_MS) {
+                      return;
+                  }
+                  lastRotate = now;
+                  List<Entry> list = ranked;
+                  rankIndex++;
+                  if (list == null || rankIndex >= list.size()) {
+                      rankIndex = 0;
+                      refresh(true);
+                      return;
+                  }
+                  Entry e = list.get(rankIndex);
+                  if (apply(e)) {
+                      setStatus("Переключился на " + e.host + ":" + e.port + " (связь пропала)");
+                  }
+              }
+
+              public static void refresh(final boolean switchNow) {
+                  synchronized (LOCK) {
+                      if (running) {
+                          return;
+                      }
+                      running = true;
+                  }
+                  notifyListener();
+                  Utilities.globalQueue.postRunnable(new Runnable() {
+                      @Override
+                      public void run() {
+                          try {
+                              doRefresh(switchNow);
+                          } catch (Throwable t) {
+                              FileLog.e(t);
+                              setStatus("Ошибка обновления: " + t.getMessage());
+                              finish();
+                          }
+                      }
+                  });
+              }
+
+              private static void finish() {
+                  synchronized (LOCK) {
+                      running = false;
+                  }
+                  notifyListener();
+              }
+
+              private static void doRefresh(boolean switchNow) {
+                  LinkedHashMap<String, Entry> all = new LinkedHashMap<>();
+                  int okSources = 0;
+                  List<String> src = sources();
+                  for (String url : src) {
+                      String body = fetch(url);
+                      if (body == null) {
+                          String m = mirror(url);
+                          if (m != null) {
+                              body = fetch(m);
+                          }
+                      }
+                      if (body == null) {
+                          continue;
+                      }
+                      okSources++;
+                      for (Entry e : parse(body)) {
+                          if (all.size() >= MAX_ENTRIES) {
+                              break;
+                          }
+                          if (!all.containsKey(e.key())) {
+                              all.put(e.key(), e);
+                          }
+                      }
+                  }
+                  List<Entry> list = new ArrayList<>(all.values());
+                  boolean fromCache = false;
+                  if (list.isEmpty()) {
+                      list = loadCache();
+                      fromCache = true;
+                  } else {
+                      saveCache(list);
+                      SharedPreferences p = prefs();
+                      if (p != null) {
+                          p.edit().putLong(KEY_LAST, System.currentTimeMillis()).apply();
+                      }
+                  }
+                  if (list.isEmpty()) {
+                      setStatus("Источники недоступны (" + okSources + "/" + src.size() + "), кэш пуст");
+                      finish();
+                      return;
+                  }
+                  final int total = list.size();
+                  final String origin = fromCache ? "из кэша" : "источников " + okSources + "/" + src.size();
+                  Collections.shuffle(list);
+                  if (list.size() > MAX_PROBE) {
+                      list = new ArrayList<>(list.subList(0, MAX_PROBE));
+                  }
+                  probe(list, switchNow, total, origin);
+              }
+
+              private static void probe(List<Entry> list, final boolean switchNow, final int total, final String origin) {
+                  final List<Entry> results = Collections.synchronizedList(new ArrayList<Entry>());
+                  final AtomicInteger left = new AtomicInteger(list.size());
+                  final AtomicBoolean done = new AtomicBoolean(false);
+                  final int probed = list.size();
+                  final Runnable fin = new Runnable() {
+                      @Override
+                      public void run() {
+                          if (done.compareAndSet(false, true)) {
+                              final ArrayList<Entry> copy;
+                              synchronized (results) {
+                                  copy = new ArrayList<>(results);
+                              }
+                              AndroidUtilities.runOnUIThread(new Runnable() {
+                                  @Override
+                                  public void run() {
+                                      try {
+                                          applyRanked(copy, probed, total, origin, switchNow);
+                                      } catch (Throwable t) {
+                                          FileLog.e(t);
+                                          setStatus("Ошибка применения: " + t.getMessage());
+                                          finish();
+                                      }
+                                  }
+                              });
+                          }
+                      }
+                  };
+                  for (final Entry e : list) {
+                      boolean launched = check(e, new PingCb() {
+                          @Override
+                          public void done(long ping) {
+                              if (ping > 0) {
+                                  e.ping = ping;
+                                  results.add(e);
+                              }
+                              if (left.decrementAndGet() == 0) {
+                                  fin.run();
+                              }
+                          }
+                      });
+                      if (!launched && left.decrementAndGet() == 0) {
+                          fin.run();
+                      }
+                  }
+                  AndroidUtilities.runOnUIThread(fin, PROBE_TIMEOUT_MS);
+              }
+
+              private static void applyRanked(List<Entry> results, int probed, int total, String origin, boolean switchNow) {
+                  if (results.isEmpty()) {
+                      setStatus("Рабочих нет: проверено " + probed + " из " + total + " (" + origin + ")");
+                      finish();
+                      return;
+                  }
+                  Collections.sort(results, new Comparator<Entry>() {
+                      @Override
+                      public int compare(Entry a, Entry b) {
+                          return a.ping < b.ping ? -1 : (a.ping == b.ping ? 0 : 1);
+                      }
+                  });
+                  ranked = new ArrayList<>(results);
+                  rankIndex = 0;
+                  List<Entry> keep = results.subList(0, Math.min(KEEP, results.size()));
+                  HashSet<String> keepKeys = new HashSet<>();
+                  for (Entry e : keep) {
+                      addInfo(e);
+                      keepKeys.add(e.key());
+                  }
+                  boolean bad = !connected() || !proxyEnabled();
+                  Entry best = keep.get(0);
+                  String line;
+                  if (switchNow || bad) {
+                      apply(best);
+                      keepKeys.add(best.key());
+                      line = "Подключён " + best.host + ":" + best.port + " (" + best.ping + " мс)";
+                  } else {
+                      line = "Текущий прокси оставлен, запас: " + best.host + ":" + best.port + " (" + best.ping + " мс)";
+                  }
+                  if (currentKey.length() > 0) {
+                      keepKeys.add(currentKey);
+                  }
+                  cleanupManaged(keepKeys);
+                  SharedPreferences p = prefs();
+                  if (p != null) {
+                      p.edit().putStringSet(KEY_MANAGED, new HashSet<>(keepKeys)).apply();
+                  }
+                  String when = new java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault()).format(new java.util.Date());
+                  setStatus(when + ": " + line + ". Рабочих " + results.size() + " из " + probed + ", в списках " + total + " (" + origin + ")");
+                  finish();
+              }
+
+              private static boolean check(Entry e, final PingCb cb) {
+                  try {
+                      Object inst = ConnectionsManager.getInstance(UserConfig.selectedAccount);
+                      for (Method m : ConnectionsManager.class.getMethods()) {
+                          if (!m.getName().equals("checkProxy")) {
+                              continue;
+                          }
+                          Class<?>[] pt = m.getParameterTypes();
+                          Object[] args;
+                          if (pt.length == 6) {
+                              args = new Object[]{e.host, e.port, "", "", e.secret, null};
+                          } else if (pt.length == 4) {
+                              args = new Object[]{e.host, e.port, e.secret, null};
+                          } else {
+                              continue;
+                          }
+                          Class<?> dt = pt[pt.length - 1];
+                          if (!dt.isInterface()) {
+                              continue;
+                          }
+                          args[args.length - 1] = Proxy.newProxyInstance(dt.getClassLoader(), new Class<?>[]{dt}, new InvocationHandler() {
+                              @Override
+                              public Object invoke(Object proxy, Method method, Object[] a) {
+                                  if (method.getDeclaringClass() == Object.class) {
+                                      String n = method.getName();
+                                      if (n.equals("hashCode")) {
+                                          return Integer.valueOf(System.identityHashCode(proxy));
+                                      }
+                                      if (n.equals("equals")) {
+                                          return Boolean.valueOf(a != null && a.length > 0 && proxy == a[0]);
+                                      }
+                                      return "FluxProxyCheck";
+                                  }
+                                  long t = -1;
+                                  if (a != null && a.length > 0 && a[0] instanceof Number) {
+                                      t = ((Number) a[0]).longValue();
+                                  }
+                                  cb.done(t);
+                                  return null;
+                              }
+                          });
+                          m.invoke(inst, args);
+                          return true;
+                      }
+                  } catch (Throwable t) {
+                      FileLog.e(t);
+                  }
+                  return false;
+              }
+
+              private static Field field(Class<?> c, String name) throws Exception {
+                  Field f = c.getDeclaredField(name);
+                  f.setAccessible(true);
+                  return f;
+              }
+
+              private static Object addInfo(Entry e) {
+                  try {
+                      Class<?> sc = Class.forName("org.telegram.messenger.SharedConfig");
+                      Class<?> pi = Class.forName("org.telegram.messenger.SharedConfig$ProxyInfo");
+                      Object info = pi.getConstructor(String.class, int.class, String.class, String.class, String.class)
+                              .newInstance(e.host, e.port, "", "", e.secret);
+                      try {
+                          Object added = sc.getMethod("addProxy", pi).invoke(null, info);
+                          if (pi.isInstance(added)) {
+                              info = added;
+                          }
+                      } catch (Throwable ignore) {
+                      }
+                      return info;
+                  } catch (Throwable t) {
+                      FileLog.e(t);
+                      return null;
+                  }
+              }
+
+              private static boolean apply(Entry e) {
+                  try {
+                      Class<?> sc = Class.forName("org.telegram.messenger.SharedConfig");
+                      Object info = addInfo(e);
+                      MessagesController.getGlobalMainSettings().edit()
+                              .putBoolean("proxy_enabled", true)
+                              .putString("proxy_ip", e.host)
+                              .putInt("proxy_port", e.port)
+                              .putString("proxy_user", "")
+                              .putString("proxy_pass", "")
+                              .putString("proxy_secret", e.secret)
+                              .apply();
+                      if (info != null) {
+                          try {
+                              field(sc, "currentProxy").set(null, info);
+                          } catch (Throwable ignore) {
+                          }
+                      }
+                      for (Method m : ConnectionsManager.class.getMethods()) {
+                          if (m.getName().equals("setProxySettings") && m.getParameterTypes().length == 6) {
+                              m.invoke(null, true, e.host, e.port, "", "", e.secret);
+                              break;
+                          }
+                      }
+                      try {
+                          int id = NotificationCenter.class.getField("proxySettingsChanged").getInt(null);
+                          NotificationCenter.getGlobalInstance().postNotificationName(id);
+                      } catch (Throwable ignore) {
+                      }
+                      currentKey = e.key();
+                      currentPing = e.ping;
+                      return true;
+                  } catch (Throwable t) {
+                      FileLog.e(t);
+                      return false;
+                  }
+              }
+
+              private static void cleanupManaged(Set<String> keep) {
+                  try {
+                      SharedPreferences p = prefs();
+                      Set<String> managed = p == null ? null : p.getStringSet(KEY_MANAGED, null);
+                      if (managed == null || managed.isEmpty()) {
+                          return;
+                      }
+                      Class<?> sc = Class.forName("org.telegram.messenger.SharedConfig");
+                      Class<?> pi = Class.forName("org.telegram.messenger.SharedConfig$ProxyInfo");
+                      Object listObj = field(sc, "proxyList").get(null);
+                      if (!(listObj instanceof List)) {
+                          return;
+                      }
+                      ArrayList<Object> snapshot = new ArrayList<Object>((List<?>) listObj);
+                      Method del = sc.getMethod("deleteProxy", pi);
+                      Field fa = field(pi, "address");
+                      Field fp = field(pi, "port");
+                      for (Object o : snapshot) {
+                          String key = String.valueOf(fa.get(o)).toLowerCase() + ":" + fp.getInt(o);
+                          if (managed.contains(key) && !keep.contains(key)) {
+                              del.invoke(null, o);
+                          }
+                      }
+                  } catch (Throwable t) {
+                      FileLog.e(t);
+                  }
+              }
+
+              private static void saveCache(List<Entry> list) {
+                  SharedPreferences p = prefs();
+                  if (p == null) {
+                      return;
+                  }
+                  StringBuilder sb = new StringBuilder();
+                  int n = 0;
+                  for (Entry e : list) {
+                      if (n++ >= 600) {
+                          break;
+                      }
+                      sb.append(e.host).append('|').append(e.port).append('|').append(e.secret).append('\n');
+                  }
+                  p.edit().putString(KEY_CACHE, sb.toString()).apply();
+              }
+
+              private static List<Entry> loadCache() {
+                  ArrayList<Entry> out = new ArrayList<>();
+                  SharedPreferences p = prefs();
+                  String raw = p == null ? null : p.getString(KEY_CACHE, null);
+                  if (raw == null) {
+                      return out;
+                  }
+                  for (String line : raw.split("\n")) {
+                      String[] a = line.split("\\|");
+                      if (a.length == 3) {
+                          Entry e = make(a[0], a[1], a[2]);
+                          if (e != null) {
+                              out.add(e);
+                          }
+                      }
+                  }
+                  return out;
+              }
+
+              private static String mirror(String url) {
+                  java.util.regex.Matcher m = java.util.regex.Pattern
+                          .compile("^https://raw\\.githubusercontent\\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$").matcher(url);
+                  if (!m.find()) {
+                      return null;
+                  }
+                  return "https://cdn.jsdelivr.net/gh/" + m.group(1) + "/" + m.group(2) + "@" + m.group(3) + "/" + m.group(4);
+              }
+
+              private static String fetch(String url) {
+                  HttpURLConnection c = null;
+                  try {
+                      c = (HttpURLConnection) new URL(url).openConnection();
+                      c.setConnectTimeout(10000);
+                      c.setReadTimeout(15000);
+                      c.setInstanceFollowRedirects(true);
+                      c.setRequestProperty("User-Agent", "Mozilla/5.0");
+                      if (c.getResponseCode() != 200) {
+                          return null;
+                      }
+                      InputStream in = c.getInputStream();
+                      ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                      byte[] buf = new byte[16384];
+                      int r;
+                      int total = 0;
+                      while ((r = in.read(buf)) > 0) {
+                          total += r;
+                          if (total > MAX_BYTES) {
+                              break;
+                          }
+                          bo.write(buf, 0, r);
+                      }
+                      in.close();
+                      return bo.toString("UTF-8");
+                  } catch (Throwable t) {
+                      return null;
+                  } finally {
+                      if (c != null) {
+                          c.disconnect();
+                      }
+                  }
+              }
+
+              private static Entry make(String host, String port, String secret) {
+                  try {
+                      if (host == null || port == null || secret == null) {
+                          return null;
+                      }
+                      host = host.trim();
+                      secret = secret.trim();
+                      int p = Integer.parseInt(port.trim());
+                      if (host.length() == 0 || p < 1 || p > 65535 || secret.length() < 16) {
+                          return null;
+                      }
+                      if (host.indexOf(' ') >= 0 || host.indexOf('/') >= 0) {
+                          return null;
+                      }
+                      return new Entry(host, p, secret);
+                  } catch (Throwable t) {
+                      return null;
+                  }
+              }
+
+              private static Entry fromToken(String tok) {
+                  String s = tok.replace("&amp;", "&");
+                  if (s.indexOf("proxy?") >= 0 && (s.startsWith("tg:") || s.contains("t.me/") || s.contains("telegram.me/"))) {
+                      Uri u = Uri.parse(s);
+                      return make(u.getQueryParameter("server"), u.getQueryParameter("port"), u.getQueryParameter("secret"));
+                  }
+                  if (s.indexOf("socks") >= 0 || s.startsWith("http")) {
+                      return null;
+                  }
+                  String[] p = s.split(":");
+                  if (p.length == 3) {
+                      return make(p[0], p[1], p[2]);
+                  }
+                  if (p.length == 4 && p[2].equalsIgnoreCase("mtproto")) {
+                      return make(p[0], p[1], p[3]);
+                  }
+                  return null;
+              }
+
+              static List<Entry> parse(String body) {
+                  ArrayList<Entry> out = new ArrayList<>();
+                  if (body == null) {
+                      return out;
+                  }
+                  String t = body.trim();
+                  if (t.startsWith("[") || t.startsWith("{")) {
+                      try {
+                          JSONArray arr;
+                          if (t.startsWith("[")) {
+                              arr = new JSONArray(t);
+                          } else {
+                              JSONObject root = new JSONObject(t);
+                              arr = root.optJSONArray("proxies");
+                              if (arr == null) {
+                                  arr = root.optJSONArray("data");
+                              }
+                          }
+                          if (arr != null) {
+                              for (int i = 0; i < arr.length(); i++) {
+                                  Object x = arr.opt(i);
+                                  if (x instanceof JSONObject) {
+                                      JSONObject o = (JSONObject) x;
+                                      String h = o.optString("host", o.optString("server", o.optString("ip", "")));
+                                      Entry e = make(h, o.optString("port", ""), o.optString("secret", ""));
+                                      if (e != null) {
+                                          out.add(e);
+                                      }
+                                  } else if (x instanceof String) {
+                                      Entry e = fromToken((String) x);
+                                      if (e != null) {
+                                          out.add(e);
+                                      }
+                                  }
+                              }
+                          }
+                          if (!out.isEmpty()) {
+                              return out;
+                          }
+                      } catch (Throwable ignore) {
+                      }
+                  }
+                  for (String line : t.split("[\\r\\n]+")) {
+                      for (String tok : line.trim().split("\\s+")) {
+                          if (tok.length() == 0) {
+                              continue;
+                          }
+                          Entry e = fromToken(tok);
+                          if (e != null) {
+                              out.add(e);
+                          }
+                      }
+                  }
+                  return out;
+              }
+          }
+          """
+
+          ACTIVITY_JAVA = r"""package org.telegram.ui;
+
+          import android.content.Context;
+          import android.text.Editable;
+          import android.text.InputType;
+          import android.text.TextWatcher;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.EditText;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+
+          import org.telegram.messenger.AndroidUtilities;
+          import org.telegram.messenger.FluxProxy;
+          import org.telegram.messenger.R;
+          import org.telegram.ui.ActionBar.ActionBar;
+          import org.telegram.ui.ActionBar.AlertDialog;
+          import org.telegram.ui.ActionBar.BaseFragment;
+          import org.telegram.ui.ActionBar.Theme;
+          import org.telegram.ui.Cells.HeaderCell;
+          import org.telegram.ui.Cells.TextCheckCell;
+          import org.telegram.ui.Cells.TextSettingsCell;
+
+          public class FluxProxyActivity extends BaseFragment {
+
+              private TextSettingsCell intervalCell;
+              private TextSettingsCell refreshCell;
+              private TextView statusView;
+              private EditText sourcesEdit;
+
+              @Override
+              public View createView(final Context context) {
+                  actionBar.setBackButtonImage(R.drawable.ic_ab_back);
+                  actionBar.setAllowOverlayTitle(true);
+                  actionBar.setTitle("Прокси FluxGram");
+                  actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
+                      @Override
+                      public void onItemClick(int id) {
+                          if (id == -1) {
+                              finishFragment();
+                          }
+                      }
+                  });
+
+                  FrameLayout root = new FrameLayout(context);
+                  root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
+                  fragmentView = root;
+
+                  ScrollView scroll = new ScrollView(context);
+                  root.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+                  LinearLayout list = new LinearLayout(context);
+                  list.setOrientation(LinearLayout.VERTICAL);
+                  scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  addHeader(list, context, "Прокси MTProto из GitHub");
+                  addSwitch(list, context, "Автопрокси", FluxProxy.KEY_ENABLED, true);
+                  addSwitch(list, context, "Менять прокси при обрыве связи", FluxProxy.KEY_WATCHDOG, true);
+                  intervalCell = new TextSettingsCell(context);
+                  intervalCell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  intervalCell.setOnClickListener(v -> {
+                      AlertDialog.Builder b = new AlertDialog.Builder(context);
+                      b.setTitle("Обновлять список каждые");
+                      b.setItems(FluxProxy.INTERVAL_TITLES, (dialog, which) -> {
+                          FluxProxy.setInterval(which);
+                          updateInterval();
+                      });
+                      showDialog(b.create());
+                  });
+                  list.addView(intervalCell, matchWrap());
+                  updateInterval();
+                  addNote(list, context, "Приложение само скачивает списки из GitHub, проверяет прокси пингом и включает самый быстрый. Три лучших остаются в обычном списке прокси, старые убираются. Выключатель останавливает всё, текущий прокси при этом не трогается.");
+
+                  addHeader(list, context, "Состояние");
+                  refreshCell = new TextSettingsCell(context);
+                  refreshCell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  refreshCell.setOnClickListener(v -> {
+                      if (!FluxProxy.isRunning()) {
+                          FluxProxy.refresh(true);
+                      }
+                      updateStatus();
+                  });
+                  list.addView(refreshCell, matchWrap());
+
+                  TextSettingsCell open = new TextSettingsCell(context);
+                  open.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  open.setText("Открыть список прокси", false);
+                  open.setOnClickListener(v -> presentFragment(new ProxyListActivity()));
+                  list.addView(open, matchWrap());
+                  statusView = addNote(list, context, "");
+                  updateStatus();
+
+                  addHeader(list, context, "Источники");
+                  LinearLayout box = new LinearLayout(context);
+                  box.setOrientation(LinearLayout.VERTICAL);
+                  box.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  sourcesEdit = new EditText(context);
+                  sourcesEdit.setText(FluxProxy.sourcesText());
+                  sourcesEdit.setTextSize(14);
+                  sourcesEdit.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                  sourcesEdit.setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+                  sourcesEdit.setBackground(null);
+                  sourcesEdit.setGravity(Gravity.TOP | Gravity.START);
+                  sourcesEdit.setMinLines(4);
+                  sourcesEdit.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(12), AndroidUtilities.dp(21), AndroidUtilities.dp(12));
+                  sourcesEdit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_VARIATION_URI);
+                  sourcesEdit.addTextChangedListener(new TextWatcher() {
+                      @Override
+                      public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+
+                      @Override
+                      public void onTextChanged(CharSequence s, int start, int before, int count) { }
+
+                      @Override
+                      public void afterTextChanged(Editable s) {
+                          FluxProxy.setSourcesText(s.toString());
+                      }
+                  });
+                  box.addView(sourcesEdit, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                  list.addView(box, matchWrap());
+
+                  TextSettingsCell reset = new TextSettingsCell(context);
+                  reset.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  reset.setText("Вернуть источники по умолчанию", false);
+                  reset.setOnClickListener(v -> {
+                      FluxProxy.setSourcesText(FluxProxy.DEFAULT_SOURCES);
+                      sourcesEdit.setText(FluxProxy.DEFAULT_SOURCES);
+                  });
+                  list.addView(reset, matchWrap());
+                  addNote(list, context, "Один адрес на строку. Читаются .txt и .json со ссылками tg://proxy, https://t.me/proxy и строками host:port:secret. Если raw.githubusercontent.com недоступен, берётся зеркало jsDelivr. Публичные прокси видят твой IP и метаданные трафика.");
+
+                  FluxProxy.setListener(new Runnable() {
+                      @Override
+                      public void run() {
+                          updateStatus();
+                      }
+                  });
+                  return fragmentView;
+              }
+
+              @Override
+              public void onFragmentDestroy() {
+                  FluxProxy.setListener(null);
+                  super.onFragmentDestroy();
+              }
+
+              private void updateInterval() {
+                  intervalCell.setTextAndValue("Обновлять список каждые", FluxProxy.INTERVAL_TITLES[FluxProxy.interval()], true);
+              }
+
+              private void updateStatus() {
+                  if (statusView == null || refreshCell == null) {
+                      return;
+                  }
+                  boolean run = FluxProxy.isRunning();
+                  refreshCell.setText(run ? "Идёт проверка прокси…" : "Обновить и подключить сейчас", true);
+                  statusView.setText(FluxProxy.status());
+              }
+
+              private LinearLayout.LayoutParams matchWrap() {
+                  return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+              }
+
+              private void addHeader(LinearLayout list, Context context, String title) {
+                  HeaderCell header = new HeaderCell(context);
+                  header.setText(title);
+                  header.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  list.addView(header, matchWrap());
+              }
+
+              private void addSwitch(LinearLayout list, Context context, String title, final String key, boolean divider) {
+                  final TextCheckCell cell = new TextCheckCell(context);
+                  cell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  cell.setTextAndCheck(title, FluxProxy.get(key), divider);
+                  cell.setOnClickListener(v -> {
+                      boolean value = !FluxProxy.get(key);
+                      FluxProxy.set(key, value);
+                      cell.setChecked(value);
+                      updateStatus();
+                  });
+                  list.addView(cell, matchWrap());
+              }
+
+              private TextView addNote(LinearLayout list, Context context, String text) {
+                  TextView note = new TextView(context);
+                  note.setText(text);
+                  note.setTextSize(14);
+                  note.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+                  note.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(10), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
+                  list.addView(note, matchWrap());
+                  return note;
+              }
+          }
+          """
+
+          import re, os, sys
+
+          SRC = "TMessagesProj/src/main/java/org/telegram/"
+          report = []
+          def ok(m): print(m); report.append("OK   " + m)
+          def warn(m): print("::warning::" + m); report.append("FAIL " + m)
+          def read(p):
+              try:
+                  return open(p, encoding="utf-8").read()
+              except FileNotFoundError:
+                  return ""
+          def write(p, s):
+              open(p, "w", encoding="utf-8").write(s)
+
+          auto = os.environ.get("AUTO_PROXY", "true") != "false"
+          urls = [u for u in re.split(r"[\s,]+", os.environ.get("PROXY_SOURCES", "")) if u.startswith("http")]
+          if not urls:
+              urls = DEFAULT_URLS
+          literal = '"' + "\\n".join(u.replace("\\", "").replace('"', "") for u in urls) + '"'
+          print("автопрокси по умолчанию: %s, источников: %d" % (auto, len(urls)))
+
+          proxy = PROXY_JAVA.replace("@SOURCES@", literal).replace("@AUTO@", "true" if auto else "false")
+          write(SRC + "messenger/FluxProxy.java", proxy)
+          write(SRC + "ui/FluxProxyActivity.java", ACTIVITY_JAVA)
+          ok("FluxProxy.java и FluxProxyActivity.java созданы (источников: %d)" % len(urls))
+
+          al_path = SRC + "messenger/ApplicationLoader.java"
+          al = read(al_path)
+          hooked = False
+          if "FluxProxy.startup" in al:
+              ok("ApplicationLoader: запуск автопрокси уже подключён"); hooked = True
+          else:
+              pat = re.compile(r'(public void onCreate\(\)\s*\{\n)')
+              if len(pat.findall(al)) != 1:
+                  warn("ApplicationLoader.java: onCreate не найден, автопрокси не запустится")
+              else:
+                  hook = ("        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {\n"
+                          "            @Override\n"
+                          "            public void run() {\n"
+                          "                try {\n"
+                          "                    FluxProxy.startup();\n"
+                          "                } catch (Throwable t) {\n"
+                          "                    FileLog.e(t);\n"
+                          "                }\n"
+                          "            }\n"
+                          "        }, 1500);\n")
+                  write(al_path, pat.sub(lambda m: m.group(1) + hook, al, count=1))
+                  ok("ApplicationLoader: автопрокси стартует через 1.5 с после запуска")
+                  hooked = True
+
+          hp = SRC + "ui/FluxHubActivity.java"
+          h = read(hp)
+          if not h:
+              warn("FluxHubActivity.java не найден, пункт «Прокси из GitHub» не добавлен (сам автопрокси работает)")
+          elif "FluxProxyActivity" in h:
+              ok("FluxHub: пункт прокси уже добавлен")
+          else:
+              m = re.search(r'(?m)^([ \t]*)return fragmentView;', h)
+              if not m:
+                  warn("FluxHub: не нашёл return fragmentView")
+              else:
+                  ind = m.group(1)
+                  lp = "new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)"
+                  block = ("TextSettingsCell fluxProxy = new TextSettingsCell(context);\n"
+                           "fluxProxy.setText(\"Прокси из GitHub\", false);\n"
+                           "fluxProxy.setOnClickListener(v -> presentFragment(new FluxProxyActivity()));\n"
+                           "c.addView(fluxProxy, " + lp + ");\n\n")
+                  block = "".join((ind + l if l.strip() else l) + "\n" for l in block.rstrip("\n").split("\n")) + "\n"
+                  h = h[:m.start()] + block + h[m.start():]
+                  h2 = re.sub(r'(copyKeep\.setTextAndCheck\([^;]*?),\s*false\);', r'\1, true);', h, count=1)
+                  if h2 == h:
+                      warn("FluxHub: у «Копировать с форматированием» не сменился разделитель (косметика)")
+                  h = h2
+                  write(hp, h)
+                  ok("FluxHub: добавлен пункт «Прокси из GitHub»")
+
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
+              f.write("## FluxGram: автопрокси MTProto из GitHub\n```\n" + "\n".join(report) + "\n```\n")
+
+          if not hooked:
+              print("::error::Автопрокси не подключён к запуску приложения, сборка остановлена")
+              sys.exit(1)
+
+          PY
+
       - name: Нативные библиотеки (libvpx, ffmpeg, boringssl)
         working-directory: TMessagesProj/jni
         run: |
@@ -6553,7 +7663,7 @@ jobs:
               fi
             fi
             unzip -p "$f" 'classes*.dex' > /tmp/all.dex
-            for str in "Автоответчик" "Копировать с форматированием"; do
+            for str in "Автоответчик" "Копировать с форматированием" "Автопрокси"; do
               if ! grep -aq "$str" /tmp/all.dex; then
                 echo "::error::В $f нет функции: $str"
                 fail=1
