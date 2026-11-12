@@ -5015,9 +5015,11 @@ jobs:
                   try {
                       for (int i = 0; i < updates.size(); i++) {
                           TLRPC.Update u = updates.get(i);
-                          if (u instanceof TLRPC.TL_updateNewMessage) {
-                              TLRPC.Message m = ((TLRPC.TL_updateNewMessage) u).message;
-                              if (m == null || m.out || m instanceof TLRPC.TL_messageService || m.action != null) continue;
+                          if (u != null && "TL_updateNewMessage".equals(u.getClass().getSimpleName())) {
+                              Object mo = u.getClass().getField("message").get(u);
+                              if (!(mo instanceof TLRPC.Message)) continue;
+                              TLRPC.Message m = (TLRPC.Message) mo;
+                              if (m.out || m instanceof TLRPC.TL_messageService || m.action != null) continue;
                               long did = MessageObject.getDialogId(m);
                               if (did > 0) {
                                   consider(acc, did, m.message, m.date);
@@ -5759,6 +5761,18 @@ jobs:
                   write(au_path, au[:m.end()] + hook + au[m.end():])
                   ok("AndroidUtilities.addToClipboard: хук FluxClip.put")
 
+          au = read(au_path)
+          if "FluxClip.put" in au and not re.search(r'addToClipboard\s*\(\s*(?:CharSequence|String)\s+\w+\s*,', au):
+              pass
+          m2 = re.search(r'public\s+static\s+(boolean|void)\s+addToClipboard\s*\(\s*(?:CharSequence|String)\s+(\w+)\s*,[^)]*\)\s*\{', au)
+          if m2 and au.count("FluxClip.put(" + m2.group(2) + ")") < 2:
+              ret2 = " true" if m2.group(1) == "boolean" else ""
+              hook2 = "\n        if (org.telegram.messenger.FluxClip.put(%s)) {\n            return%s;\n        }" % (m2.group(2), ret2)
+              write(au_path, au[:m2.end()] + hook2 + au[m2.end():])
+              ok("AndroidUtilities.addToClipboard(текст, html): хук FluxClip.put")
+          else:
+              ok("AndroidUtilities: перегрузка addToClipboard(текст, html) не найдена или уже пропатчена")
+
           # ---------- 6. Копирование: источник из меню сообщения
           ca_path = SRC + "ui/ChatActivity.java"
           ca = read(ca_path)
@@ -5805,7 +5819,23 @@ jobs:
                               depth -= 1
                           q += 1
                       inner = s[k:q - 1]
-                      out.append(s[i:k]); out.append("org.telegram.messenger.FluxClip.hint(this, " + inner + "))")
+                      d2, cut, qq = 0, len(inner), 0
+                      while qq < len(inner):
+                          ch = inner[qq]
+                          if ch == '"':
+                              qq += 1
+                              while qq < len(inner) and inner[qq] != '"':
+                                  if inner[qq] == '\\': qq += 1
+                                  qq += 1
+                          elif ch in "([{":
+                              d2 += 1
+                          elif ch in ")]}":
+                              d2 -= 1
+                          elif ch == "," and d2 == 0:
+                              cut = qq; break
+                          qq += 1
+                      first, rest = inner[:cut], inner[cut:]
+                      out.append(s[i:k]); out.append("org.telegram.messenger.FluxClip.hint(this, " + first + ")" + rest + ")")
                       i = q; n += 1
                   if n:
                       write(p, "".join(out))
