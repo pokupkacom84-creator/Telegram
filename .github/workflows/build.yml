@@ -91,7 +91,6 @@ jobs:
       - name: Системные пакеты
         run: |
           set +e
-          # azure.archive.ubuntu.com не резолвится на раннере -> переключаем apt на другие зеркала
           for f in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
             [ -f "$f" ] && sudo cp -n "$f" "$f.orig"
           done
@@ -157,7 +156,6 @@ jobs:
           pkg = os.environ["APP_PACKAGE"]
           name = os.environ["APP_NAME"]
 
-          # applicationId во всех build.gradle (кроме jni)
           for f in glob.glob("**/build.gradle", recursive=True):
               if f.startswith(".git") or "/jni/" in f or f.startswith("TMessagesProj/jni"):
                   continue
@@ -168,8 +166,6 @@ jobs:
                   open(f, "w", encoding="utf-8").write(n)
                   print("applicationId ->", f)
 
-          # google-services.json должен содержать новый package_name,
-          # иначе сборка падает с "No matching client found for package name"
           for f in glob.glob("**/google-services.json", recursive=True):
               if f.startswith(".git"):
                   continue
@@ -178,12 +174,10 @@ jobs:
               clients = d.get("client", [])
               extra = copy.deepcopy(clients[0])
               extra["client_info"]["android_client_info"]["package_name"] = pkg
-              # оставляем исходные клиенты и добавляем клиент с новым именем пакета
               d["client"] = clients + [extra]
               json.dump(d, open(f, "w", encoding="utf-8"), indent=2)
               print("google-services ->", f, [c["client_info"]["android_client_info"]["package_name"] for c in d["client"]])
 
-          # Huawei-модуль проверяет agconnect-services.json (на случай, если он всё же собирается)
           for f in glob.glob("**/agconnect-services.json", recursive=True):
               if f.startswith(".git"):
                   continue
@@ -193,8 +187,6 @@ jobs:
                   json.dump(d, open(f, "w", encoding="utf-8"), indent=2)
                   print("agconnect ->", f, pkg)
 
-          # Gradle init-скрипт: принудительно задаёт applicationId,
-          # где бы он ни был объявлен в проекте
           open("rebrand.init.gradle", "w").write('''
           allprojects {
               afterEvaluate { p ->
@@ -212,11 +204,20 @@ jobs:
           }
           '''.replace("\n          ", "\n"))
 
-          # название приложения
           p = "TMessagesProj/src/main/res/values/strings.xml"
           s = open(p, encoding="utf-8").read()
           s = re.sub(r'(<string name="AppName(?:Beta)?"[^>]*>)[^<]*', lambda m: m.group(1) + name, s)
           open(p, "w", encoding="utf-8").write(s)
+
+          label_re = re.compile(r'android:label="@string/(?:AppName|AppNameBeta|ApplicationName)"')
+          for mf in glob.glob("**/AndroidManifest.xml", recursive=True):
+              if mf.startswith(".git") or "/build/" in mf or "/jni/" in mf:
+                  continue
+              t = open(mf, encoding="utf-8").read()
+              n = label_re.sub('android:label="' + name + '"', t)
+              if n != t:
+                  open(mf, "w", encoding="utf-8").write(n)
+                  print("manifest label ->", mf)
           PY
           grep -rn "applicationId" --include=build.gradle . | grep -v jni || true
           grep -n 'name="AppName' TMessagesProj/src/main/res/values/strings.xml || true
@@ -258,7 +259,6 @@ jobs:
           cases = []
           offline_impl = "private static void sendOffline() { }"
 
-          # --- чтение сообщений: запрос не уходит, но запоминается (для «Читать при действиях»)
           if has("TL_messages_readHistory"):
               cases.append('if (req instanceof TLRPC.TL_messages_readHistory) { if (on(KEY_READ)) { remember(peerKey(((TLRPC.TL_messages_readHistory) req).peer), req); return true; } return false; }')
           if has("TL_channels_readHistory"):
@@ -267,16 +267,13 @@ jobs:
               if has(n):
                   cases.append('if (req instanceof TLRPC.%s) return on(KEY_READ);' % n)
 
-          # --- истории
           for n in ("TL_stories_readStories", "TL_stories_incrementStoryViews"):
               if has(n):
                   cases.append('if (req instanceof %s) return on(KEY_STORIES);' % Q[n])
 
-          # --- «печатает»
           if has("TL_messages_setTyping"):
               cases.append('if (req instanceof TLRPC.TL_messages_setTyping) return on(KEY_TYPING);')
 
-          # --- «онлайн»
           if has("updateStatus", "TL_account"):
               ST = Q["updateStatus"]
               cases.append('if (req instanceof %s) { if (on(KEY_ONLINE)) { ((%s) req).offline = true; } return false; }' % (ST, ST))
@@ -294,7 +291,6 @@ jobs:
                   }, 1500);
               }"""
 
-          # --- отправка сообщений / реакции: «читать при действиях», «офлайн», «без звука»
           sends = [("TL_messages_sendMessage", "peer", True),
                    ("TL_messages_sendMedia", "peer", True),
                    ("TL_messages_sendMultiMedia", "peer", True),
@@ -329,7 +325,6 @@ jobs:
               public static final String KEY_ACTION_READ = "ghost_read_on_action";
               public static final String KEY_SILENT = "send_silent";
 
-              // последний «прочитано» по каждому чату, который мы не отправили
               private static final ConcurrentHashMap<String, TLObject> PENDING = new ConcurrentHashMap<>();
               private static final ThreadLocal<Boolean> BYPASS = new ThreadLocal<>();
 
@@ -360,7 +355,6 @@ jobs:
                   }
               }
 
-              /** функция работает, если включён общий режим призрака и сам пункт */
               private static boolean on(String key) {
                   return get(KEY_GHOST) && get(key);
               }
@@ -400,7 +394,6 @@ jobs:
 
               @OFFLINE_IMPL@
 
-              /** true = запрос не отправлять на сервер */
               public static boolean drop(TLObject req) {
                   if (req == null) return false;
                   if (Boolean.TRUE.equals(BYPASS.get())) return false;
@@ -447,7 +440,6 @@ jobs:
           import re, glob, os
 
           NAME = os.environ["APP_NAME"]
-          # не трогаем ссылки, @юзернеймы, #теги и части слов (TelegramPremium и т.п.)
           pat = re.compile(r'(?<![A-Za-z0-9_/@.#:=-])Telegram(?![A-Za-z0-9_])')
 
           def fix(m):
@@ -579,8 +571,6 @@ jobs:
 
           NAME = os.environ["APP_NAME"]
 
-          # Заголовок списка чатов берётся из языкового пакета с сервера (ключ AppName = "Telegram"),
-          # поэтому подменяем сами вызовы на строку с названием приложения.
           call = re.compile(
               r'(?:LocaleController\s*\.\s*)?getString\(\s*'
               r'(?:"(?:AppName|ApplicationName|AppNameBeta)"\s*,\s*)?'
@@ -613,7 +603,6 @@ jobs:
               print("хук уже стоит")
               sys.exit(0)
 
-          # 1) все getString*(String key, int res) { -> ранний возврат для AppName / AppNameBeta
           pat_key = re.compile(
               r'(\bString\s+getString\w*\(\s*(?:final\s+)?String\s+(\w+)\s*,\s*(?:final\s+)?int\s+\w+\s*\)\s*\{)')
           cnt = [0]
@@ -623,7 +612,6 @@ jobs:
               return m.group(1) + ' /*FLUXNAME_HOOK*/ if ("AppName".equals(%s) || "AppNameBeta".equals(%s) || "ApplicationName".equals(%s)) return "%s";' % (k, k, k, NAME)
           s = pat_key.sub(sub_key, s)
 
-          # 2) getString(int res) { -> то же по id ресурса
           pat_res = re.compile(r'(\bString\s+getString\(\s*(?:final\s+)?(?:@StringRes\s+)?int\s+(\w+)\s*\)\s*\{)')
           def sub_res(m):
               r = m.group(2)
@@ -639,9 +627,7 @@ jobs:
           print("AppName hook вставлен в методов:", cnt[0])
           PY
 
-          # проверка: хук реально в файле
           grep -c "FLUXNAME_HOOK" TMessagesProj/src/main/java/org/telegram/messenger/LocaleController.java
-          # диагностика: где ещё осталась строка Telegram в заголовках
           grep -rnE 'setTitle\(\s*"Telegram' TMessagesProj/src/main/java | head -20 || true
           grep -rn 'R.string.AppName' TMessagesProj/src/main/java --include=*.java | head -20 || true
 
@@ -812,7 +798,6 @@ jobs:
                   return size(attachmentsDir());
               }
 
-              /** удаляет самые старые вложения, если превышен выбранный лимит */
               public static void trim() {
                   try {
                       int idx = getLimit();
@@ -846,7 +831,6 @@ jobs:
                   return f.delete();
               }
 
-              // ---- исключения (ID диалогов) ----
               public static Set<String> getExceptions() {
                   SharedPreferences p = prefs();
                   Set<String> s = p == null ? null : p.getStringSet(KEY_EXCEPTIONS, null);
@@ -857,7 +841,6 @@ jobs:
                   return getExceptions().contains(String.valueOf(dialogId));
               }
 
-              /** true — добавлен, false — убран */
               public static boolean toggleException(long dialogId) {
                   Set<String> s = getExceptions();
                   String k = String.valueOf(dialogId);
@@ -872,7 +855,6 @@ jobs:
                   return added;
               }
 
-              // ---- база данных ----
               private static synchronized SQLiteDatabase db() {
                   if (helper == null) {
                       helper = new SQLiteOpenHelper(ApplicationLoader.applicationContext, "spy.db", null, 1) {
@@ -998,7 +980,6 @@ jobs:
                   }
               }
 
-              /** добавляет пометку к времени сообщения, если оно было удалено */
               public static String decorateTime(MessageObject mo, String time) {
                   if (isDeleted(mo)) {
                       return "🗑 удалено" + (time == null || time.length() == 0 ? "" : ", " + time);
@@ -1045,7 +1026,6 @@ jobs:
                   return b.create();
               }
 
-              /** копирует скачанное вложение сообщения в папку шпиона */
               public static void saveAttachment(final File src, Object parent) {
                   try {
                       if (src == null || !get(KEY_ATTACH) || !(parent instanceof MessageObject)) return;
@@ -1111,7 +1091,6 @@ jobs:
 
               @STATUS_IMPL@
 
-              /** Вызывается из MessagesController.processUpdateArray: удалённые сообщения остаются в чате. */
               public static void filterUpdates(ArrayList<TLRPC.Update> updates) {
                   if (updates == null) return;
                   try {
@@ -1129,7 +1108,6 @@ jobs:
           java = java.replace("@STATUS_IMPL@", status_impl).replace("@CASES@", "\n                ".join(cases))
           open("TMessagesProj/src/main/java/org/telegram/messenger/SpyMode.java", "w", encoding="utf-8").write(java)
 
-          # --- хук в MessagesController
           mc = "TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java"
           src = open(mc, encoding="utf-8").read()
           pat = re.compile(r'(\b(?:void|boolean)\s+processUpdateArray\s*\(\s*(?:final\s+)?(?:java\.util\.)?ArrayList<TLRPC\.Update>\s+(\w+)\s*,[^{;]*\)\s*\{)', re.S)
@@ -1161,7 +1139,6 @@ jobs:
 
           ui = "TMessagesProj/src/main/java/org/telegram/ui"
 
-          # --- пометка «🗑 удалено» рядом со временем сообщения
           cell = ui + "/Cells/ChatMessageCell.java"
           s = open(cell, encoding="utf-8").read()
           pat = re.compile(r'(\btimeString\s*=\s*timeString\(\s*currentMessageObject\s*,\s*messageObject\s*,\s*edited\s*,[^;]*;)')
@@ -1172,7 +1149,6 @@ jobs:
           else:
               warn("ChatMessageCell: не нашёл строку timeString = timeString(...) — пометка «удалено» не добавлена")
 
-          # --- «История правок» в меню сообщения
           chat = ui + "/ChatActivity.java"
           s = open(chat, encoding="utf-8").read()
           ok = True
@@ -1275,7 +1251,6 @@ jobs:
           if not glob.glob(res + "/drawable*/ic_ab_back.*"):
               bail("нет ic_ab_back")
 
-          # --- иконка пункта (белый самолётик на цветном фоне)
           os.makedirs(res + "/drawable", exist_ok=True)
           open(res + "/drawable/settings_fluxgram.xml", "w", encoding="utf-8").write(
               '<vector xmlns:android="http://schemas.android.com/apk/res/android"\n'
@@ -1285,7 +1260,6 @@ jobs:
               '        android:pathData="M2.01,21L23,12 2.01,3 2,10l15,2 -15,2z"/>\n'
               '</vector>\n')
 
-          # --- экран настроек
           frag = """package org.telegram.ui;
 
           import android.content.Context;
@@ -1704,7 +1678,6 @@ jobs:
                   card.addView(cell, matchWrap());
               }
 
-              /** Ползунок лимита вложений: 300 MB · 1 GB · 2 GB · 5 GB · 16 GB · ∞ */
               static class LimitView extends View {
                   interface Callback {
                       void onSelect(int index);
@@ -1886,7 +1859,6 @@ jobs:
               print("::warning::TextSettingsCell другой API — экран «Шпион» не создан")
               hub_ok = False
 
-          # --- пункт в SettingsActivity: отдельная группа после блока «Язык»
           s = open(sa_path, encoding="utf-8").read()
           m = re.search(r'\n([ \t]*)items\.add\(SettingCell\.Factory\.of\(10,[^\n]*\);', s)
           if not m:
@@ -1995,7 +1967,6 @@ jobs:
                   return s
               return re.sub(r'(?m)^(package [^\n]+;\n)', lambda m: m.group(1) + "\n" + imp + "\n", s, count=1)
 
-          # TL-схема: какие классы resolveUsername/resolvedPeer реально есть в этом форке
           tlrpc = read(tg + "/TLRPC.java")
           SRC = {"TLRPC": tlrpc}
           import glob
@@ -2012,7 +1983,6 @@ jobs:
 
           resolve_ok = has("TL_contacts_resolveUsername") and has("TL_contacts_resolvedPeer")
 
-          # ============================================================ FluxVisual (ядро: premium, сохранение чата, удалённые диалоги)
           visual = r"""package org.telegram.messenger;
 
           import android.content.Context;
@@ -2028,7 +1998,6 @@ jobs:
           import java.util.List;
           import java.util.Set;
 
-          /** Локальные визуальные настройки FluxGram. Сервер и реальный аккаунт не затрагиваются. */
           public final class FluxVisual {
 
               private static final String PREFS = "fluxgram";
@@ -2065,7 +2034,6 @@ jobs:
                   return false;
               }
 
-              // ---------------------------------------------------------------- Premium (визуал)
               public static boolean premiumOn() {
                   int s = premiumState;
                   if (s < 0) {
@@ -2134,7 +2102,6 @@ jobs:
                   }, 4000);
               }
 
-              // ---------------------------------------------------------------- Сохранение чата + затемнение (как в AyuGram)
               public static boolean keepChat() {
                   int s = keepState;
                   if (s < 0) {
@@ -2167,7 +2134,6 @@ jobs:
                   }
               }
 
-              /** Диалог удалён/покинут со стороны собеседника, но оставлен в списке благодаря «Сохранять чат». */
               public static synchronized void markRemovedDialog(long dialogId) {
                   loadRemovedDialogs();
                   if (removedDialogs.add(dialogId)) {
@@ -2216,7 +2182,6 @@ jobs:
           write(msg + "/FluxVisual.java", visual)
           ok("FluxVisual пересобран (без звёзд и интерфейса; Removed-диалоги, события: %s)" % ", ".join(events))
 
-          # ============================================================ удаляем старые экраны «Звёзды» и «Интерфейс Telegram»
           for f, title in ((ui + "/FluxStarsActivity.java", "Звёзды"), (ui + "/FluxInterfaceActivity.java", "Интерфейс Telegram")):
               if os.path.exists(f):
                   os.remove(f)
@@ -2224,7 +2189,6 @@ jobs:
               else:
                   ok("Экран «%s» отсутствует, удалять нечего" % title)
 
-          # откатываем правки StarsController (визуальный баланс больше не нужен)
           import glob as _glob
           for p in _glob.glob(base + "/**/StarsController.java", recursive=True):
               s = read(p)
@@ -2233,10 +2197,8 @@ jobs:
                   write(p, s2)
                   ok("StarsController: визуальный баланс отключён")
 
-          # откатываем hide_premium для FluxVisual.premiumOn (SettingsActivity) — больше не завязано на звёзды/интерфейс, оставляем как есть
           ok("Premium (визуал) и Сохранять чат оставлены без изменений")
 
-          # ============================================================ хаб «Настройки FluxGram»: убираем пункты Звёзды / Интерфейс Telegram
           hub_p = ui + "/FluxHubActivity.java"
           hub = read(hub_p)
           if not hub:
@@ -2249,7 +2211,6 @@ jobs:
                   write(hub_p, hub)
                   ok("FluxHub: убраны пункты Звёзды и Интерфейс Telegram")
 
-          # ============================================================ затемнение удалённых сообщений (как в AyuGram)
           p = ui + "/Cells/ChatMessageCell.java"
           s = read(p)
           anchor = "timeString = org.telegram.messenger.SpyMode.decorateTime(currentMessageObject, timeString);"
@@ -2262,7 +2223,6 @@ jobs:
           else:
               warn("ChatMessageCell: не нашёл строку decorateTime — затемнение удалённых сообщений не подключено")
 
-          # ============================================================ затемнение диалога, удалённого/покинутого со стороны собеседника
           p = msg + "/SecretChatHelper.java"
           s = read(p)
           anchor2 = "if (newChat instanceof TLRPC.TL_encryptedChatDiscarded && newChat.history_deleted && !FluxVisual.keepChat()) {"
@@ -2278,7 +2238,6 @@ jobs:
           else:
               warn("SecretChatHelper: не нашёл патч «Сохранять чат» из прошлого шага, затемнение секретных чатов не подключено")
 
-          # ============================================================ применяем затемнение в списке чатов
           cands = glob.glob(ui + "/Cells/DialogCell.java")
           if not cands:
               warn("DialogCell.java не найден, затемнение в списке чатов не подключено")
@@ -2320,6 +2279,12 @@ jobs:
             echo "Secrets APP_ID/APP_HASH не заданы — используются ключи из репозитория"
           fi
 
+      - name: Кэш keystore (одна и та же подпись между сборками)
+        uses: actions/cache@v4
+        with:
+          path: TMessagesProj/config/release.keystore
+          key: fluxgram-temp-keystore-v1
+
       - name: Keystore для подписи
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -2328,13 +2293,11 @@ jobs:
           S_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
         run: |
           mkdir -p TMessagesProj/config
-          # убираем случайные пробелы и переводы строк из секретов
           S_STORE_PASS=$(printf %s "$S_STORE_PASS" | tr -d '\r\n')
           S_KEY_ALIAS=$(printf %s "$S_KEY_ALIAS" | tr -d '\r\n ')
           S_KEY_PASS=$(printf %s "$S_KEY_PASS" | tr -d '\r\n')
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 -d > TMessagesProj/config/release.keystore
-            # быстрая проверка до часовой сборки
             if ! keytool -list -keystore TMessagesProj/config/release.keystore \
                  -storepass "$S_STORE_PASS" -alias "$S_KEY_ALIAS" > /dev/null 2>&1; then
               echo "::error::keystore не открывается: неверный KEYSTORE_PASSWORD или KEY_ALIAS. Сборка остановлена, чтобы не тратить час"
@@ -2345,10 +2308,12 @@ jobs:
             echo "KS_KEY_PASS=${S_KEY_PASS}" >> "$GITHUB_ENV"
             echo "Используется ваш keystore из secrets"
           else
-            rm -f TMessagesProj/config/release.keystore
-            keytool -genkeypair -noprompt -keystore TMessagesProj/config/release.keystore \
-              -alias fluxgram -keyalg RSA -keysize 2048 -validity 36500 \
-              -storepass android123 -keypass android123 -dname "CN=FluxGram, O=FluxGram, C=US"
+            if ! keytool -list -keystore TMessagesProj/config/release.keystore -storepass android123 -alias fluxgram > /dev/null 2>&1; then
+              rm -f TMessagesProj/config/release.keystore
+              keytool -genkeypair -noprompt -keystore TMessagesProj/config/release.keystore \
+                -alias fluxgram -keyalg RSA -keysize 2048 -validity 36500 \
+                -storepass android123 -keypass android123 -dname "CN=FluxGram, O=FluxGram, C=US"
+            fi
             echo "KS_STORE_PASS=android123" >> "$GITHUB_ENV"
             echo "KS_ALIAS=fluxgram" >> "$GITHUB_ENV"
             echo "KS_KEY_PASS=android123" >> "$GITHUB_ENV"
@@ -2765,7 +2730,6 @@ jobs:
               "classic": Image.open(io.BytesIO(base64.b64decode(CLASSIC))).convert("RGBA"),
               "ocean": Image.open(io.BytesIO(base64.b64decode(OCEAN))).convert("RGBA"),
           }
-          # в Telegram: Классика = Vintage, Океан = Aqua
           KEYS = {"classic": "VINTAGE", "ocean": "AQUA"}
           FALLBACK = {"classic": "vintage", "ocean": "aqua"}
 
@@ -2823,7 +2787,6 @@ jobs:
                   print("  заменено:", f, size)
           print("всего файлов заменено:", total)
 
-          # значок FluxGram рядом с ником
           os.makedirs("TMessagesProj/src/main/res/drawable-nodpi", exist_ok=True)
           rounded(SRC["ocean"], (96, 96)).save("TMessagesProj/src/main/res/drawable-nodpi/flux_badge.webp", "WEBP")
           print("flux_badge.webp создан")
@@ -2851,14 +2814,12 @@ jobs:
           import android.graphics.drawable.Drawable;
           import android.os.SystemClock;
 
-          // Значок FluxGram с частицами. official = значок официального канала (синяя «галочка» и золотые искры)
           public class FluxBadgeDrawable extends Drawable {
 
               private static final int N = 9;
               private static final int[] COLORS = {0xFF7FD6FF, 0xFFFFFFFF, 0xFFB388FF, 0xFF8CF0D0};
               private static final int[] COLORS_OFFICIAL = {0xFFFFD54F, 0xFFFFFFFF, 0xFF7FD6FF, 0xFFFFB74D};
 
-              // Состояние частиц общее для всех значков: переключатель в настройках действует сразу, без перезапуска
               private static volatile int particlesState = -1;
 
               private final Context appCtx;
@@ -3006,7 +2967,6 @@ jobs:
 
           public final class FluxBadge implements NotificationCenter.NotificationCenterDelegate {
 
-              // Невидимая метка в конце «О себе»: так друг друга находят пользователи FluxGram
               public static final String MARK = "⁠​⁠";
               public static final String OFFICIAL_CHANNEL = "FluxGraam";
 
@@ -3014,7 +2974,6 @@ jobs:
               private static final String KNOWN = "flux_known_users";
               private static final String CHECKED = "flux_checked_users";
 
-              // Проверка идёт медленно, чтобы не словить лимиты Telegram: один пользователь в секунду
               private static final long CHECK_INTERVAL_MS = 1000L;
               private static final long TTL_FLUX_MS = 7L * 24 * 3600 * 1000;
               private static final long TTL_PLAIN_MS = 3L * 24 * 3600 * 1000;
@@ -3026,11 +2985,8 @@ jobs:
               private static final Object LOCK = new Object();
               private static final FluxBadge INSTANCE = new FluxBadge();
 
-              // Кто из людей точно пользуется FluxGram
               private static final Set<Long> known = new HashSet<>();
-              // Когда пользователя проверяли в последний раз (мс)
               private static final Map<Long, Long> checked = new HashMap<>();
-              // Когда пытались загрузить профиль в этой сессии (чтобы не долбить сервер повторами)
               private static final Map<Long, Long> tried = new HashMap<>();
               private static final ArrayDeque<Job> queue = new ArrayDeque<>();
               private static final Set<Long> queued = new HashSet<>();
@@ -3055,13 +3011,10 @@ jobs:
                   }
               }
 
-              // ---------- проверки ----------
-
               public static boolean isFluxUser(String about) {
                   return about != null && about.contains(MARK);
               }
 
-              // Свой аккаунт всегда со значком, чужие: по метке в «О себе» или по сохранённому списку
               public static boolean isFluxUser(long userId, String about) {
                   init(UserConfig.selectedAccount);
                   if (!enabled()) {
@@ -3099,7 +3052,6 @@ jobs:
                   if (chat.username != null && chat.username.equalsIgnoreCase(OFFICIAL_CHANNEL)) {
                       return true;
                   }
-                  // У каналов с несколькими именами публичный адрес лежит в списке usernames
                   try {
                       synchronized (LOCK) {
                           if (!usernamesLookedUp) {
@@ -3131,7 +3083,6 @@ jobs:
                           }
                       }
                   } catch (Throwable ignore) {
-                      // нет такого поля в этой версии Telegram
                   }
                   return false;
               }
@@ -3140,7 +3091,6 @@ jobs:
                   return prefs().getBoolean("flux_badge", true);
               }
 
-              // Включить или выключить значок. Выключенный значок не рисуется нигде, проверка людей приостанавливается
               public static void setEnabled(boolean on) {
                   prefs().edit().putBoolean("flux_badge", on).apply();
                   if (on) {
@@ -3161,14 +3111,10 @@ jobs:
                   return System.currentTimeMillis();
               }
 
-              // ---------- значки ----------
-
-              // Статичный вариант для списков (ImageSpan не умеет анимироваться)
               public static Drawable drawable(Context ctx) {
                   return new FluxBadgeDrawable(ctx, false, false);
               }
 
-              // Анимированный вариант с частицами для заголовков (SimpleTextView / профиль)
               public static Drawable drawableAnimated(Context ctx) {
                   return new FluxBadgeDrawable(ctx, true, false);
               }
@@ -3189,7 +3135,6 @@ jobs:
                   return sb;
               }
 
-              // Имя пользователя + значок (для списков и шапки личного чата)
               public static CharSequence wrapUser(Context ctx, CharSequence name, TLRPC.User user) {
                   if (name == null || user == null) {
                       return name;
@@ -3206,7 +3151,6 @@ jobs:
                       flux = known.contains(user.id);
                   }
                   if (!flux) {
-                      // Пользователя ещё не проверяли: ставим в начало очереди на тихую проверку «О себе»
                       if (!user.bot && !user.deleted) {
                           enqueue(UserConfig.selectedAccount, user.id, true);
                       }
@@ -3215,7 +3159,6 @@ jobs:
                   return append(ctx, name, false);
               }
 
-              // Название канала + значок официального канала
               public static CharSequence wrapChat(Context ctx, CharSequence title, TLRPC.Chat chat) {
                   if (title == null || !isOfficialChannel(chat)) {
                       return title;
@@ -3223,9 +3166,6 @@ jobs:
                   return append(ctx, title, true);
               }
 
-              // ---------- обнаружение других пользователей FluxGram ----------
-
-              // Запомнить результат проверки. flux = у человека найдена метка
               private static void learn(long uid, boolean flux) {
                   boolean changed;
                   synchronized (LOCK) {
@@ -3300,7 +3240,6 @@ jobs:
                   }
               };
 
-              // За один «тик» делает не больше одного сетевого запроса. Профили, которые уже в памяти, обрабатываются сразу
               private static void pumpOnce() {
                   for (int guard = 0; guard < 300; guard++) {
                       Job j;
@@ -3332,13 +3271,11 @@ jobs:
                       synchronized (LOCK) {
                           tried.put(j.uid, now());
                       }
-                      // Ответ придёт в didReceivedNotification (userInfoDidLoad)
                       mc.loadFullUser(u, 0, true);
                       return;
                   }
               }
 
-              // Просмотр списков: сначала собеседники из диалогов, потом контакты
               private static void scan(int account) {
                   if (!enabled()) {
                       return;
@@ -3418,8 +3355,6 @@ jobs:
                   }, 500);
               }
 
-              // ---------- сохранение между запусками ----------
-
               private static void scheduleSave() {
                   synchronized (LOCK) {
                       if (saveScheduled) {
@@ -3481,9 +3416,6 @@ jobs:
                   }
               }
 
-              // ---------- запуск и метка в собственном профиле ----------
-
-              // Вызывается при старте приложения (хук в ApplicationLoader) и лениво из интерфейса. Повторные вызовы безопасны
               public static void init(int account) {
                   synchronized (LOCK) {
                       if (inited) {
@@ -3526,7 +3458,6 @@ jobs:
                   }
               }
 
-              // Дописывает невидимую метку в «О себе». Не чаще раза в 6 часов, чтобы не зациклиться, если сервер её уберёт
               private static void apply(final int account, String about) {
                   if (!enabled()) {
                       return;
@@ -3543,7 +3474,6 @@ jobs:
                       return;
                   }
                   int max = uc.isPremium() ? 140 : 70;
-                  // Чужой текст не обрезаем: если «О себе» заполнено под завязку, метку не ставим
                   if (base.length() + MARK.length() > max) {
                       return;
                   }
@@ -3633,7 +3563,6 @@ jobs:
 
               private static final String PREFS = "fluxgram_prefs";
 
-              // Роли Material You 3. Системные цвета (Android 12+) или палитра из выбранного оттенка
               public enum Role {
                   PRIMARY(android.R.color.system_accent1_200, android.R.color.system_accent1_600),
                   ON_PRIMARY(android.R.color.system_accent1_800, android.R.color.system_neutral1_0),
@@ -3661,7 +3590,6 @@ jobs:
                   }
               }
 
-              // Настройки лежат в кэше: override() вызывается на каждый запрос цвета, читать prefs каждый раз нельзя
               private static volatile int myState = -1;
               private static volatile int hueState = Integer.MIN_VALUE;
               private static volatile int satState = -1;
@@ -3691,7 +3619,6 @@ jobs:
                   refresh();
               }
 
-              // Выбранный оттенок: -1 = системные динамические цвета (обои), 0..360 = палитра из оттенка
               public static int seedHue(Context c) {
                   int v = hueState;
                   if (v == Integer.MIN_VALUE) {
@@ -3710,7 +3637,6 @@ jobs:
                   return v;
               }
 
-              // Выбор палитры сразу включает Material You, иначе выбранные цвета нигде не применились бы
               public static void setSeedQuiet(Context c, int hue, int sat) {
                   prefs(c).edit().putInt("flux_seed_hue", hue).putInt("flux_seed_sat", sat).putBoolean("material_you", true).apply();
                   hueState = hue;
@@ -3740,18 +3666,15 @@ jobs:
                   refresh();
               }
 
-              // Применить изменения: сбросить кэш цветов и сообщить интерфейсу о смене темы
               public static void refresh() {
                   TINT_CACHE.clear();
                   try {
                       Theme.class.getMethod("refreshThemeColors").invoke(null);
                   } catch (Throwable ignore) {
-                      // кисти обновятся по уведомлению ниже
                   }
                   try {
                       Theme.class.getMethod("invalidateTheme").invoke(null);
                   } catch (Throwable ignore) {
-                      // метода нет в этой версии: достаточно уведомления ниже
                   }
                   try {
                       NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.didSetNewTheme, false);
@@ -3777,7 +3700,6 @@ jobs:
                   return darkMethod;
               }
 
-              // Тёмная ли сейчас тема Telegram (она может отличаться от системной). Если не узнать, берём системную
               public static boolean isDark(Context c) {
                   if (Boolean.TRUE.equals(BUSY.get())) {
                       return systemDark(c);
@@ -3792,7 +3714,6 @@ jobs:
                           }
                       }
                   } catch (Throwable ignore) {
-                      // тема ещё не загружена
                   } finally {
                       BUSY.set(Boolean.FALSE);
                   }
@@ -3803,7 +3724,6 @@ jobs:
                   return seedHue(c) < 0;
               }
 
-              // Цвет роли для текущей темы. fallback: если Material You выключен
               public static int role(Context c, Role role, int fallback) {
                   if (!isMaterialYou(c)) {
                       return fallback;
@@ -3814,7 +3734,6 @@ jobs:
                   return preview(c, role, isDark(c));
               }
 
-              // Цвет роли независимо от переключателей (для превью в настройках)
               public static int preview(Context c, Role role, boolean dark) {
                   int hue = seedHue(c);
                   if (hue < 0) {
@@ -3840,7 +3759,6 @@ jobs:
                   return palette(role, dark, hue, sat, false);
               }
 
-              // Тональная палитра из оттенка (упрощённая модель HCT на основе HSL)
               private static int palette(Role r, boolean dark, float h, float s, boolean amoled) {
                   float n = Math.min(0.12f, s * 0.22f);
                   switch (r) {
@@ -3863,7 +3781,6 @@ jobs:
                   }
               }
 
-              // Чёрные поверхности для AMOLED (когда палитра системная или Material You выключен)
               private static Integer amoledSurface(Role r) {
                   switch (r) {
                       case SURFACE: return 0xFF000000;
@@ -3897,18 +3814,15 @@ jobs:
                               map.put(f.getInt(null), role);
                           }
                       } catch (Throwable ignore) {
-                          // такого ключа нет в этой версии Telegram: пропускаем
                       }
                   }
               }
 
-              // Таблица «ключ Telegram → роль M3». Ключи ищутся по имени, отсутствующие пропускаются
               private static synchronized SparseArray<Role> table() {
                   if (map != null) {
                       return map;
                   }
                   map = new SparseArray<>();
-                  // Поверхности
                   put(new String[]{"key_actionBarDefault", "key_windowBackgroundWhite", "key_dialogBackground",
                           "key_chat_messagePanelBackground", "key_chats_menuBackground",
                           "key_actionBarDefaultSubmenuBackground", "key_chat_emojiPanelBackground"}, Role.SURFACE);
@@ -3916,7 +3830,6 @@ jobs:
                           "key_actionBarDefaultSelector", "key_listSelector"}, Role.SURFACE_VARIANT);
                   put(new String[]{"key_graySection", "key_chats_pinnedOverlay", "key_chat_inBubble",
                           "key_chat_inBubbleSelected", "key_chat_emojiSearchBackground"}, Role.SURFACE_CONTAINER_HIGH);
-                  // Текст и иконки
                   put(new String[]{"key_actionBarDefaultTitle", "key_actionBarDefaultIcon", "key_windowBackgroundWhiteBlackText",
                           "key_dialogTextBlack", "key_chats_name", "key_chats_menuName", "key_chat_messagePanelText",
                           "key_chat_messageTextIn", "key_actionBarDefaultSubmenuItem", "key_actionBarTabUnactiveText"}, Role.ON_SURFACE);
@@ -3926,7 +3839,6 @@ jobs:
                           "key_chat_messagePanelHint", "key_chat_messagePanelIcons", "key_chats_menuItemIcon",
                           "key_chats_menuItemText"}, Role.ON_SURFACE_VARIANT);
                   put(new String[]{"key_divider", "key_windowBackgroundWhiteGrayLine"}, Role.OUTLINE);
-                  // Акценты
                   put(new String[]{"key_windowBackgroundWhiteBlueText", "key_windowBackgroundWhiteBlueText2",
                           "key_windowBackgroundWhiteBlueText4", "key_windowBackgroundWhiteBlueHeader",
                           "key_windowBackgroundWhiteBlueIcon", "key_switchTrackChecked", "key_dialogButton",
@@ -3935,18 +3847,15 @@ jobs:
                           "key_featuredStickers_addButton", "key_progressCircle", "key_chats_menuTopBackground"}, Role.PRIMARY);
                   put(new String[]{"key_chats_unreadCounterText", "key_featuredStickers_buttonText",
                           "key_switchTrackBlueThumb"}, Role.ON_PRIMARY);
-                  // Кнопка-FAB и исходящие сообщения в стиле «контейнеров» M3
                   put(new String[]{"key_chats_actionBackground", "key_chats_actionPressedBackground",
                           "key_chat_outBubble", "key_chat_outBubbleSelected"}, Role.PRIMARY_CONTAINER);
                   put(new String[]{"key_chats_actionIcon", "key_chat_messageTextOut", "key_chat_outSentCheck",
                           "key_chat_outSentCheckSelected", "key_chat_outTimeText", "key_chat_outMenu",
                           "key_chat_outReplyNameText"}, Role.ON_PRIMARY_CONTAINER);
-                  // Счётчики и поиск
                   put(new String[]{"key_chats_unreadCounter", "key_chats_actionMessage"}, Role.TERTIARY);
                   put(new String[]{"key_actionBarDefaultSearch", "key_actionBarDefaultSearchPlaceholder"}, Role.ON_SURFACE_VARIANT);
                   put(new String[]{"key_chat_inLoader", "key_chat_inContactBackground", "key_avatar_backgroundActionBarBlue"}, Role.SECONDARY_CONTAINER);
                   put(new String[]{"key_chat_inContactIcon", "key_chat_inFileIcon"}, Role.ON_SECONDARY_CONTAINER);
-                  // Пузыри, ответы, ссылки, галочки, вкладки, режим выделения
                   put(new String[]{"key_chat_outBubbleGradient1", "key_chat_outBubbleGradient2", "key_chat_outBubbleGradient3"}, Role.PRIMARY_CONTAINER);
                   put(new String[]{"key_chat_outReplyLine", "key_chat_outPreviewInstantText", "key_chat_outViaBotNameText",
                           "key_chat_messageLinkOut", "key_chat_outSentClock", "key_chat_outSentClockSelected"}, Role.ON_PRIMARY_CONTAINER);
@@ -3961,9 +3870,6 @@ jobs:
                   return map;
               }
 
-              // Переопределение цвета ключа Telegram. null = не трогаем.
-              // Свои оттенки работают на любой версии Android; «системные» только на Android 12+.
-              // AMOLED работает отдельно от Material You и с любой палитрой
               public static Integer override(int key) {
                   Context c = ApplicationLoader.applicationContext;
                   if (c == null) {
@@ -3991,12 +3897,6 @@ jobs:
                   return preview(c, r, dark);
               }
 
-              // ===== Полное покрытие: все остальные ключи Telegram (их сотни) перекрашиваются автоматически =====
-              // Берём исходный цвет текущей темы Telegram и по правилам переносим его в палитру Material You:
-              //  - нейтральные серые (поверхности, текст, разделители) получают лёгкий оттенок палитры;
-              //  - синие акценты (ссылки, галочки, кнопки, выделение) получают оттенок палитры;
-              //  - красные, зелёные, жёлтые и т.д. (смысловые цвета) не трогаются;
-              //  - яркость и прозрачность сохраняются, поэтому контраст темы не ломается.
               private static final ConcurrentHashMap<Long, Integer> TINT_CACHE = new ConcurrentHashMap<>();
               private static volatile SparseBooleanArray skipKeys;
               private static volatile float seedH = 205f;
@@ -4005,7 +3905,6 @@ jobs:
               private static volatile long seedStamp;
               private static volatile int seedSys;
 
-              // Ключи, которые должны остаться как есть (аватарки, обои, плеер, звонки, графики, тени, сервисные плашки поверх обоев)
               private static SparseBooleanArray skip() {
                   SparseBooleanArray s = skipKeys;
                   if (s != null) {
@@ -4031,7 +3930,6 @@ jobs:
                                   try {
                                       s.put(f.getInt(null), true);
                                   } catch (Throwable ignore) {
-                                      // поле недоступно: пропускаем
                                   }
                                   break;
                               }
@@ -4042,7 +3940,6 @@ jobs:
                   }
               }
 
-              // Оттенок, насыщенность и «серая» насыщенность палитры. Для системных цветов берём обои (Android 12+)
               private static void updateSeed(Context c) {
                   int hue = seedHue(c);
                   if (hue >= 0) {
@@ -4073,7 +3970,6 @@ jobs:
                       rgbToHsl(n, hsl);
                       seedN = Math.max(0.03f, Math.min(0.12f, hsl[1]));
                   } catch (Throwable ignore) {
-                      // оставляем прежнюю палитру
                   }
               }
 
@@ -4117,7 +4013,6 @@ jobs:
                   float s = hsl[1];
                   float l = hsl[2];
                   if (s < 0.10f) {
-                      // серый: поверхности, текст, разделители
                       if (l >= 0.985f || l <= 0.015f) {
                           return orig;
                       }
@@ -4131,7 +4026,6 @@ jobs:
                       return nl != l ? hslA(h, s, nl, alpha) : orig;
                   }
                   if (my && h >= 185f && h <= 262f) {
-                      // синий акцент или синеватая поверхность тёмной темы Telegram
                       float ns = Math.min(0.92f, s * (seedS / 0.55f));
                       float nl = l;
                       if (am && dark && l < 0.25f) {
@@ -4142,7 +4036,6 @@ jobs:
                   return orig;
               }
 
-              // Вызывается из Theme для ключей, которых нет в таблице ролей. orig = исходный цвет темы Telegram
               public static int tint(int key, int orig) {
                   Context c = ApplicationLoader.applicationContext;
                   if (c == null) {
@@ -4175,7 +4068,6 @@ jobs:
                   return res;
               }
 
-              // Размеры скруглений M3: диалоги 28dp, карточки 16dp, поля 12dp
               public static int cornerDialog() { return AndroidUtilities.dp(28); }
               public static int cornerCard() { return AndroidUtilities.dp(16); }
               public static int cornerField() { return AndroidUtilities.dp(12); }
@@ -4229,7 +4121,6 @@ jobs:
           import java.util.ArrayList;
           import java.util.Random;
 
-          // Темы FluxGram: динамические цвета Material You 3, свои оттенки, AMOLED и живое превью
           public class FluxThemesActivity extends BaseFragment implements NotificationCenter.NotificationCenterDelegate {
 
               private static final String[] NAMES = {"Системные", "Океан", "Закат", "Лес", "Лаванда", "Роза", "Янтарь", "Бирюза", "Графит"};
@@ -4262,8 +4153,6 @@ jobs:
 
               private boolean rebuildPosted;
 
-              // Тема поменялась (в том числе нами): перекрашиваем свой экран, пересобрав содержимое.
-              // Делаем это отложенно, чтобы не удалять ползунок прямо во время его события
               @Override
               public void didReceivedNotification(int id, int account, Object... args) {
                   if (id == NotificationCenter.didSetNewTheme && !rebuildPosted) {
@@ -4329,7 +4218,6 @@ jobs:
                   actionBar.setItemsColor(Theme.getColor(Theme.key_actionBarDefaultIcon), false);
               }
 
-              // Остальные открытые экраны (настройки, список чатов) берут новые цвета при пересоздании. Текущий не трогаем
               private void rebuildStack() {
                   try {
                       Object layout = parentLayout;
@@ -4338,7 +4226,6 @@ jobs:
                                   .invoke(layout, false, false);
                       }
                   } catch (Throwable ignore) {
-                      // старые экраны перекрасятся при следующем открытии приложения
                   }
               }
 
@@ -4346,12 +4233,10 @@ jobs:
                   final Context context = ctx;
                   swatches.clear();
 
-                  // --- превью: светлая и тёмная тема рядом
                   addHeader("Предпросмотр");
                   preview = new PreviewView(context);
                   list.addView(preview, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, AndroidUtilities.dp(210)));
 
-                  // --- включатель
                   final TextCheckCell my = newCell();
                   my.setTextAndCheck("Динамические цвета Material You 3", FluxFeatures.isMaterialYou(context), false);
                   my.setOnClickListener(new View.OnClickListener() {
@@ -4365,7 +4250,6 @@ jobs:
                   list.addView(my, matchWrap());
                   addNote("Цвета приложения берутся из вашей палитры. «Системные» подхватывают обои (Android 12+), остальные работают на любой версии Android.");
 
-                  // --- палитры
                   addHeader("Палитра");
                   HorizontalScrollView hs = new HorizontalScrollView(context);
                   hs.setHorizontalScrollBarEnabled(false);
@@ -4403,7 +4287,6 @@ jobs:
                   hs.addView(row);
                   list.addView(hs, matchWrap());
 
-                  // --- свой оттенок
                   addHeader("Свой оттенок");
                   LinearLayout sliders = new LinearLayout(context);
                   sliders.setOrientation(LinearLayout.VERTICAL);
@@ -4427,7 +4310,6 @@ jobs:
                   sliders.addView(satBar, matchWrap());
                   list.addView(sliders, matchWrap());
 
-                  // ползунки только запоминают значение и обновляют превью; цвета приложения меняются, когда отпустили палец
                   SeekBar.OnSeekBarChangeListener l = new SeekBar.OnSeekBarChangeListener() {
                       @Override
                       public void onProgressChanged(SeekBar bar, int p, boolean fromUser) {
@@ -4449,7 +4331,6 @@ jobs:
                   hueBar.setOnSeekBarChangeListener(l);
                   satBar.setOnSeekBarChangeListener(l);
 
-                  // --- кубик
                   dice = new TextView(context);
                   dice.setText("🎲  Случайная палитра");
                   dice.setTextSize(16);
@@ -4465,7 +4346,6 @@ jobs:
                   dlp.setMargins(AndroidUtilities.dp(16), AndroidUtilities.dp(14), AndroidUtilities.dp(16), AndroidUtilities.dp(6));
                   list.addView(dice, dlp);
 
-                  // --- оформление
                   addHeader("Оформление");
                   final TextCheckCell amoled = newCell();
                   amoled.setTextAndCheck("Чёрный AMOLED фон в тёмной теме", FluxFeatures.amoled(context), true);
@@ -4579,7 +4459,6 @@ jobs:
                   list.addView(note, matchWrap());
               }
 
-              // Круг-образец палитры с кольцом выбранного
               private class Swatch extends View {
                   private final int hue;
                   private final int sat;
@@ -4621,7 +4500,6 @@ jobs:
                   }
               }
 
-              // Два значка: пользователя FluxGram и официального канала. Показывают, как выглядят частицы
               private class BadgePreview extends View {
                   private final FluxBadgeDrawable userBadge;
                   private final FluxBadgeDrawable officialBadge;
@@ -4659,7 +4537,6 @@ jobs:
                   }
               }
 
-              // Две мини-панели: светлая и тёмная версия чата в выбранной палитре
               private class PreviewView extends View {
                   private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
                   private final RectF rf = new RectF();
@@ -4692,23 +4569,17 @@ jobs:
                   private void drawPanel(Canvas c, int x, int y, int w, int h, boolean dark) {
                       int d = AndroidUtilities.dp(1);
                       box(c, x, y, x + w, y + h, AndroidUtilities.dp(24), col(Role.SURFACE, dark));
-                      // верхняя панель
                       box(c, x + d * 10, y + d * 10, x + w - d * 10, y + d * 34, d * 12, col(Role.SURFACE_CONTAINER, dark));
                       box(c, x + d * 18, y + d * 18, x + d * 70, y + d * 26, d * 4, col(Role.ON_SURFACE, dark));
-                      // входящее сообщение
                       box(c, x + d * 10, y + d * 44, x + w * 0.72f, y + d * 78, d * 14, col(Role.SURFACE_CONTAINER_HIGH, dark));
                       box(c, x + d * 20, y + d * 56, x + w * 0.5f, y + d * 62, d * 3, col(Role.ON_SURFACE_VARIANT, dark));
-                      // исходящее
                       box(c, x + w * 0.28f, y + d * 86, x + w - d * 10, y + d * 120, d * 14, col(Role.PRIMARY_CONTAINER, dark));
                       box(c, x + w * 0.4f, y + d * 98, x + w * 0.82f, y + d * 104, d * 3, col(Role.ON_PRIMARY_CONTAINER, dark));
-                      // чипы
                       box(c, x + d * 10, y + d * 130, x + d * 56, y + d * 148, d * 9, col(Role.SECONDARY_CONTAINER, dark));
                       box(c, x + d * 62, y + d * 130, x + d * 100, y + d * 148, d * 9, col(Role.TERTIARY_CONTAINER, dark));
-                      // FAB
                       float fb = y + h - d * 12;
                       box(c, x + w - d * 56, fb - d * 44, x + w - d * 12, fb, d * 14, col(Role.PRIMARY_CONTAINER, dark));
                       box(c, x + w - d * 42, fb - d * 30, x + w - d * 26, fb - d * 14, d * 4, col(Role.ON_PRIMARY_CONTAINER, dark));
-                      // поле ввода
                       box(c, x + d * 10, fb - d * 36, x + w - d * 68, fb, d * 18, col(Role.SURFACE_VARIANT, dark));
                   }
               }
@@ -4749,7 +4620,6 @@ jobs:
           SRC = "TMessagesProj/src/main/java/org/telegram/"
           CTX = "org.telegram.messenger.ApplicationLoader.applicationContext"
 
-          # 1. Material You: перехват цветов
           p = SRC + "ui/ActionBar/Theme.java"
           s = read(p)
           sig = "private static int getColorFromTable(SparseIntArray currentColors, int key, boolean[] isDefault) {\n"
@@ -4758,8 +4628,6 @@ jobs:
                   "        if (fluxColor != null) {\n"
                   "            return fluxColor;\n"
                   "        }\n")
-          # Явные роли M3 идут через override(), все остальные ключи (сотни) через tint():
-          # исходный цвет темы Telegram перекрашивается в палитру Material You
           wrap1 = (sig +
                    "        if (currentColors != Theme.currentColors) {\n"
                    "            return getColorFromTableFluxOrig(currentColors, key, isDefault);\n"
@@ -4784,7 +4652,6 @@ jobs:
           else:
               warn("Theme.java: не найден ни getColorFromTable, ни getColor, цвета Material You не подключены")
 
-          # 2. Списки пользователей
           p = SRC + "ui/Cells/UserCell.java"
           if os.path.exists(p):
               s = read(p)
@@ -4798,7 +4665,6 @@ jobs:
                   write(p, add_import(s))
                   ok("UserCell: значок в списках пользователей")
 
-          # 3. Профиль: пользователь (значок с частицами) и канал (значок официального канала)
           p = SRC + "ui/ProfileActivity.java"
           s = read(p)
           if "FluxBadge" in s:
@@ -4828,7 +4694,6 @@ jobs:
               else:
                   warn("ProfileActivity: якорь канала не найден")
 
-          # 4. Шапка чата: пользователь и официальный канал
           p = SRC + "ui/ChatActivity.java"
           s = read(p)
           if "FluxBadge" in s:
@@ -4849,7 +4714,6 @@ jobs:
               else:
                   warn("ChatActivity: якорь шапки канала не найден")
 
-          # 5. Официальный канал: настоящая «галочка» во всех списках
           p = SRC + "messenger/MessagesController.java"
           s = read(p)
           pat = re.compile(r'(public void putChat\(\s*(?:final )?TLRPC\.Chat chat,\s*boolean fromCache\)\s*\{\n)')
@@ -4862,7 +4726,6 @@ jobs:
               write(p, s)
               ok("MessagesController: «галочка» официального канала в списках чатов")
 
-          # 6. Настройки: пункт «Темы FluxGram». id берём свободный, чтобы не конфликтовать с другими пунктами
           p = SRC + "ui/SettingsActivity.java"
           s = read(p)
           if "FluxThemesActivity" in s:
@@ -4886,7 +4749,6 @@ jobs:
                   write(p, s)
                   ok("SettingsActivity: пункт «Темы FluxGram» (id %d)" % new_id)
 
-          # 7. Автозапуск: фоновая проверка «О себе» у людей из списков и метка в своём профиле стартуют вместе с приложением
           p = SRC + "messenger/ApplicationLoader.java"
           s = read(p)
           pat = re.compile(r'(public void onCreate\(\)\s*\{\n)')
@@ -4919,7 +4781,6 @@ jobs:
           U="TMessagesProj/src/main/java/org/telegram/ui"
           M="TMessagesProj/src/main/java/org/telegram/messenger"
 
-          # ======================================================== AutoReply.java
           cat > "$M/AutoReply.java" <<'JAVA'
           package org.telegram.messenger;
 
@@ -4932,7 +4793,6 @@ jobs:
           import java.util.Random;
           import java.util.concurrent.ConcurrentHashMap;
 
-          /** Автоответчик: отвечает на личные сообщения, пока приложение не на экране (ты офлайн). */
           public class AutoReply {
               public static final String KEY_ENABLED = "ar_enabled";
               public static final String KEY_TEXT = "ar_text";
@@ -4943,7 +4803,6 @@ jobs:
               public static final int[] COOLDOWN_HOURS = {1, 6, 24, 168};
               public static final String[] COOLDOWN_TITLES = {"1 час", "6 часов", "1 день", "1 неделя"};
 
-              // собеседники, которым мы только что ответили: для них режим призрака не должен слать «прочитано»
               private static final ConcurrentHashMap<String, Long> SUPPRESS = new ConcurrentHashMap<>();
               private static final Random RND = new Random();
 
@@ -4989,7 +4848,6 @@ jobs:
                   }
               }
 
-              /** GhostMode спрашивает: этот запрос на отправку наш автоответ? Тогда «прочитано» не шлём. */
               public static boolean suppressed(String peerKey) {
                   if (peerKey == null) return false;
                   Long until = SUPPRESS.get(peerKey);
@@ -5002,23 +4860,17 @@ jobs:
               }
 
               private static boolean isForeground() {
-                  try {
-                      return !ApplicationLoader.class.getField("mainInterfacePaused").getBoolean(null);
-                  } catch (Throwable t) {
-                      return false;
-                  }
+                  return !ApplicationLoader.mainInterfacePaused;
               }
 
-              /** Вызывается из MessagesController.processUpdateArray */
               public static void filterUpdates(int acc, ArrayList<TLRPC.Update> updates) {
                   if (updates == null || !get(KEY_ENABLED)) return;
                   try {
                       for (int i = 0; i < updates.size(); i++) {
                           TLRPC.Update u = updates.get(i);
-                          if (u != null && "TL_updateNewMessage".equals(u.getClass().getSimpleName())) {
-                              Object mo = u.getClass().getField("message").get(u);
-                              if (!(mo instanceof TLRPC.Message)) continue;
-                              TLRPC.Message m = (TLRPC.Message) mo;
+                          if (u instanceof TLRPC.TL_updateNewMessage) {
+                              TLRPC.Message m = ((TLRPC.TL_updateNewMessage) u).message;
+                              if (m == null) continue;
                               if (m.out || m instanceof TLRPC.TL_messageService || m.action != null) continue;
                               long did = MessageObject.getDialogId(m);
                               if (did > 0) {
@@ -5029,7 +4881,22 @@ jobs:
                   } catch (Throwable ignore) { }
               }
 
-              /** Вызывается из MessagesController.processUpdates (короткие личные сообщения) */
+              public static void onMessages(int acc, ArrayList<MessageObject> messages) {
+                  if (messages == null || !get(KEY_ENABLED)) return;
+                  try {
+                      for (int i = 0; i < messages.size(); i++) {
+                          MessageObject mo = messages.get(i);
+                          if (mo == null || mo.messageOwner == null) continue;
+                          TLRPC.Message m = mo.messageOwner;
+                          if (m.out || m instanceof TLRPC.TL_messageService || m.action != null) continue;
+                          long did = mo.getDialogId();
+                          if (did > 0) {
+                              consider(acc, did, m.message, m.date);
+                          }
+                      }
+                  } catch (Throwable ignore) { }
+              }
+
               public static void onUpdates(int acc, TLRPC.Updates updates) {
                   if (updates == null || !get(KEY_ENABLED)) return;
                   try {
@@ -5045,15 +4912,14 @@ jobs:
 
               private static void consider(final int acc, final long uid, String incoming, int date) {
                   try {
-                      long now = System.currentTimeMillis() / 1000;
-                      // старые сообщения (догрузка после долгого офлайна) не трогаем
+                      long now = org.telegram.tgnet.ConnectionsManager.getInstance(acc).getCurrentTime();
                       if (Math.abs(now - date) > 600) return;
                       if (uid == 777000L || uid == UserConfig.getInstance(acc).getClientUserId()) return;
                       if (!get(KEY_ONLINE) && isForeground()) return;
 
                       final String reply = text();
                       if (reply == null || reply.trim().isEmpty()) return;
-                      if (incoming != null && incoming.equals(reply)) return; // защита от переписки двух автоответчиков
+                      if (incoming != null && incoming.equals(reply)) return;
 
                       TLRPC.User user = MessagesController.getInstance(acc).getUser(uid);
                       if (user != null && (user.bot || user.deleted || user.self)) return;
@@ -5084,7 +4950,6 @@ jobs:
           }
           JAVA
 
-          # ======================================================== FluxClip.java
           cat > "$M/FluxClip.java" <<'JAVA'
           package org.telegram.messenger;
 
@@ -5111,11 +4976,6 @@ jobs:
           import java.util.Comparator;
           import java.util.List;
 
-          /**
-           * Копирование с форматированием: при копировании сообщения запоминаем его entities
-           * (премиум-эмодзи, цитаты, жирный, спойлер, моно, ссылки...) и возвращаем их при вставке в Telegram.
-           * Другим приложениям уходит обычный текст + html.
-           */
           public class FluxClip {
               private static final String PREFS = "flux_clip";
               private static final String KEY_ENABLED = "enabled";
@@ -5142,13 +5002,11 @@ jobs:
                   }
               }
 
-              /** ChatActivity.processSelectedOption: запоминаем сообщение, с которым сейчас работает меню */
               public static void setSource(MessageObject m) {
                   source = m;
                   sourceTime = SystemClock.elapsedRealtime();
               }
 
-              /** TextSelectionHelper: копирование выделенного куска текста сообщения */
               public static CharSequence hint(Object helper, CharSequence text) {
                   try {
                       Object view = fieldValue(helper, "selectedView");
@@ -5186,9 +5044,6 @@ jobs:
                   return null;
               }
 
-              // ------------------------------------------------------------------ копирование
-
-              /** AndroidUtilities.addToClipboard: true = мы положили в буфер текст вместе с форматированием */
               public static boolean put(CharSequence str) {
                   try {
                       if (str == null || !enabled()) return false;
@@ -5279,8 +5134,6 @@ jobs:
                   }
               }
 
-              // ------------------------------------------------------------------ html для других приложений
-
               private static String tag(TLRPC.MessageEntity e, boolean open) {
                   String n = e.getClass().getSimpleName();
                   String t = null;
@@ -5341,9 +5194,6 @@ jobs:
                   return sb.toString();
               }
 
-              // ------------------------------------------------------------------ вставка
-
-              /** EditTextCaption: перехват «Вставить». true = вставили сами, с форматированием */
               public static boolean pasteInto(EditText et) {
                   try {
                       if (et == null || !enabled()) return false;
@@ -5390,7 +5240,6 @@ jobs:
                   SpannableStringBuilder sb = new SpannableStringBuilder(plain);
                   boolean done = false;
 
-                  // 1) жирный, курсив, моно, спойлер, цитаты...
                   try {
                       for (Method m : MediaDataController.class.getDeclaredMethods()) {
                           if (!m.getName().equals("addTextStyleRuns") || !Modifier.isStatic(m.getModifiers())) continue;
@@ -5409,7 +5258,6 @@ jobs:
                       }
                   } catch (Throwable ignore) { }
 
-                  // 1b) цитата, если addTextStyleRuns её не поставил
                   try {
                       for (TLRPC.MessageEntity e : list) {
                           if (!e.getClass().getSimpleName().contains("Blockquote")) continue;
@@ -5442,7 +5290,6 @@ jobs:
                       }
                   } catch (Throwable ignore) { }
 
-                  // 2) премиум (анимированные) эмодзи
                   CharSequence out = sb;
                   try {
                       for (Method m : MediaDataController.class.getDeclaredMethods()) {
@@ -5465,7 +5312,6 @@ jobs:
           }
           JAVA
 
-          # ======================================================== экран «Автоответчик»
           cat > "$U/AutoReplySettingsActivity.java" <<'JAVA'
           package org.telegram.ui;
 
@@ -5616,7 +5462,6 @@ jobs:
           }
           JAVA
 
-          # ======================================================== патчи исходников
           python3 - <<'PY'
           import re, os
 
@@ -5632,7 +5477,6 @@ jobs:
           def write(p, s):
               open(p, "w", encoding="utf-8").write(s)
 
-          # ---------- 1. AutoReply: вызов отправки под сигнатуру prepareSendingText этой версии
           def split_params(sig):
               parts, depth, cur = [], 0, ""
               for ch in sig:
@@ -5676,7 +5520,6 @@ jobs:
               write(ar_path, ar.replace("/*@SEND@*/", "// prepareSendingText не найден"))
               warn("SendMessagesHelper.prepareSendingText не найден, автоответ не сможет отправиться")
 
-          # ---------- 2. MessagesController: хуки
           mc_path = SRC + "messenger/MessagesController.java"
           mc = read(mc_path)
           if "AutoReply.filterUpdates" in mc:
@@ -5691,7 +5534,19 @@ jobs:
               (ok if n1 else warn)("MessagesController.processUpdateArray: пропатчено %d" % n1)
               (ok if n2 else warn)("MessagesController.processUpdates: пропатчено %d (короткие сообщения)" % n2)
 
-          # ---------- 3. GhostMode: автоответ не должен слать «прочитано»
+          nc_path = SRC + "messenger/NotificationsController.java"
+          nc = read(nc_path)
+          if "AutoReply.onMessages" in nc:
+              ok("NotificationsController: хук уже стоит")
+          else:
+              pat3 = re.compile(r'(\bvoid\s+processNewMessages\s*\(\s*(?:final\s+)?ArrayList<MessageObject>\s+(\w+)\s*,[^{;]*\)\s*\{)', re.S)
+              nc, n3 = pat3.subn(lambda m: m.group(1) + "\n        org.telegram.messenger.AutoReply.onMessages(currentAccount, %s);" % m.group(2), nc)
+              if n3:
+                  write(nc_path, nc)
+                  ok("NotificationsController.processNewMessages: хук автоответчика (мест: %d)" % n3)
+              else:
+                  warn("NotificationsController.processNewMessages не найден, автоответ работает только через хуки MessagesController")
+
           gm_path = SRC + "messenger/GhostMode.java"
           gm = read(gm_path)
           anchor = "private static void onAction(String key) {"
@@ -5705,7 +5560,6 @@ jobs:
           else:
               warn("GhostMode: не нашёл onAction")
 
-          # ---------- 4. Хаб «Настройки FluxGram»: пункты «Автоответчик» и «Копировать с форматированием»
           hp = SRC + "ui/FluxHubActivity.java"
           h = read(hp)
           hub_done = False
@@ -5746,7 +5600,6 @@ jobs:
                   os.remove(p)
                   warn("Экран автоответчика удалён: до него не добраться без хаба")
 
-          # ---------- 5. Копирование: AndroidUtilities.addToClipboard
           au_path = SRC + "messenger/AndroidUtilities.java"
           au = read(au_path)
           if "FluxClip.put" in au:
@@ -5773,7 +5626,6 @@ jobs:
           else:
               ok("AndroidUtilities: перегрузка addToClipboard(текст, html) не найдена или уже пропатчена")
 
-          # ---------- 6. Копирование: источник из меню сообщения
           ca_path = SRC + "ui/ChatActivity.java"
           ca = read(ca_path)
           if "FluxClip.setSource" in ca:
@@ -5788,7 +5640,6 @@ jobs:
                   write(ca_path, ca[:m.end()] + "\n        org.telegram.messenger.FluxClip.setSource(selectedObject);" + ca[m.end():])
                   ok("ChatActivity.processSelectedOption: источник для копирования")
 
-          # ---------- 7. Копирование выделенного фрагмента (TextSelectionHelper)
           import glob
           tsh = glob.glob(SRC + "ui/**/TextSelectionHelper.java", recursive=True)
           if not tsh:
@@ -5843,7 +5694,6 @@ jobs:
                   else:
                       warn("TextSelectionHelper: вызовов addToClipboard не найдено")
 
-          # ---------- 8. Вставка: EditTextCaption
           et_path = SRC + "ui/Components/EditTextCaption.java"
           et = read(et_path)
           if "FluxClip.pasteInto" in et:
@@ -5870,6 +5720,14 @@ jobs:
 
           with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
               f.write("## FluxGram: автоответчик и копирование с форматированием\n```\n" + "\n".join(report) + "\n```\n")
+
+          import sys
+          critical = [r for r in report if r.startswith("FAIL") and "TextSelectionHelper" not in r and "NotificationsController" not in r]
+          if critical:
+              print("::error::Не все патчи встали, сборка остановлена, чтобы не получить APK без функций:")
+              for r in critical:
+                  print("::error::" + r)
+              sys.exit(1)
           PY
 
       - name: Нативные библиотеки (libvpx, ffmpeg, boringssl)
@@ -5933,7 +5791,6 @@ jobs:
           echo "=== все .apk / .aab в проекте ==="
           find . -type f \( -name '*.apk' -o -name '*.aab' \) -not -path './.git/*' -not -path './out/*' | tee all_pkgs.txt
           echo "================================="
-          # приоритет: outputs/apk, затем intermediates/apk, затем любые *.apk приложения
           grep -E 'TMessagesProj_App/build/outputs/apk/.*\.apk$' all_pkgs.txt > apk_list.txt || true
           [ -s apk_list.txt ] || grep -E 'TMessagesProj_App/build/intermediates/apk/.*\.apk$' all_pkgs.txt > apk_list.txt || true
           [ -s apk_list.txt ] || grep -E 'TMessagesProj_App/.*\.apk$' all_pkgs.txt > apk_list.txt || true
@@ -5971,6 +5828,35 @@ jobs:
           done
           ls -lh signed
 
+      - name: Проверка APK (название и новые функции)
+        run: |
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)"
+          BT="${BT%/}"
+          fail=0
+          for f in signed/*.apk; do
+            BADGING="$("$BT/aapt2" dump badging "$f")"
+            label="$(echo "$BADGING" | grep '^application-label' || true)"
+            echo "$f -> $label"
+            if [ "$REBRAND" != "false" ]; then
+              if [ -z "$label" ] || echo "$label" | grep -qv "$APP_NAME"; then
+                echo "::error::В $f название приложения не $APP_NAME: $label"
+                fail=1
+              fi
+              if ! echo "$BADGING" | grep -q "^package: name='$APP_PACKAGE'"; then
+                echo "::error::В $f пакет не $APP_PACKAGE"
+                fail=1
+              fi
+            fi
+            unzip -p "$f" 'classes*.dex' > /tmp/all.dex
+            for str in "Автоответчик" "Копировать с форматированием"; do
+              if ! grep -aq "$str" /tmp/all.dex; then
+                echo "::error::В $f нет функции: $str"
+                fail=1
+              fi
+            done
+          done
+          exit $fail
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -5988,8 +5874,6 @@ jobs:
             native.log
           if-no-files-found: ignore
 
-  # Пробная установка в эмулятор Android 16: показывает настоящую причину,
-  # если APK не ставится. Работает только когда в APK есть x86_64 (abi = all или x86_64).
   install-test:
     needs: build
     if: ${{ inputs.abi == 'all' || inputs.abi == 'x86_64' }}
@@ -6040,8 +5924,6 @@ jobs:
           path: install.log
           if-no-files-found: ignore
 
-  # Публикация собранного APK в GitHub Releases.
-  # Приложение может проверять обновления через https://api.github.com/repos/<owner>/<repo>/releases/latest
   release:
     needs: build
     if: ${{ success() }}
