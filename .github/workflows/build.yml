@@ -52,6 +52,26 @@ on:
         description: "FluxGram: корневая папка Telegram/ -> FluxGram/ с миграцией данных"
         type: boolean
         default: true
+      hide_ads:
+        description: "FluxGram: скрыть рекламу и спонсорские сообщения"
+        type: boolean
+        default: true
+      hide_channel_stories:
+        description: "FluxGram: скрыть истории каналов"
+        type: boolean
+        default: true
+      hide_own_phone:
+        description: "FluxGram: скрыть свой номер телефона (меню, настройки, профиль)"
+        type: boolean
+        default: true
+      profile_details:
+        description: "FluxGram: в профиле показывать ID, DC и дату регистрации"
+        type: boolean
+        default: true
+      message_seconds:
+        description: "FluxGram: время у сообщений с секундами"
+        type: boolean
+        default: true
 
 env:
   APP_NAME: FluxGram
@@ -67,6 +87,11 @@ env:
   BADGE_PARTICLES: ${{ inputs.badge_particles }}
   KEEP_VIEW_ONCE: ${{ inputs.keep_view_once }}
   FOLDER_RENAME: ${{ inputs.folder_rename }}
+  HIDE_ADS: ${{ inputs.hide_ads }}
+  HIDE_CHANNEL_STORIES: ${{ inputs.hide_channel_stories }}
+  HIDE_OWN_PHONE: ${{ inputs.hide_own_phone }}
+  PROFILE_DETAILS: ${{ inputs.profile_details }}
+  MESSAGE_SECONDS: ${{ inputs.message_seconds }}
 
 defaults:
   run:
@@ -6145,6 +6170,291 @@ jobs:
           if failed:
               print("::error::Часть патчей не применилась: " + "; ".join(failed))
               sys.exit(1)
+          PY
+
+      - name: "FluxGram: скрытие лишнего, детали профиля, секунды у сообщений"
+        run: |
+          python3 - <<'PY'
+          import os, re, glob
+
+          report = []
+          def ok(m):   print(m); report.append("OK   " + m)
+          def warn(m): print("::warning::" + m); report.append("WARN " + m)
+
+          SRC = "TMessagesProj/src/main/java"
+          def flag(n): return os.environ.get(n, "true") != "false"
+          def find(name):
+              r = glob.glob(SRC + "/**/" + name, recursive=True)
+              return r[0] if r else None
+          def rd(p): return open(p, encoding="utf-8").read()
+          def wr(p, s): open(p, "w", encoding="utf-8").write(s)
+          def jb(b): return "true" if b else "false"
+
+          HIDE_ADS = flag("HIDE_ADS")
+          HIDE_STORIES = flag("HIDE_CHANNEL_STORIES")
+          HIDE_PHONE = flag("HIDE_OWN_PHONE")
+          DETAILS = flag("PROFILE_DETAILS")
+          SECONDS = flag("MESSAGE_SECONDS")
+
+          EXTRAS = r'''package org.telegram.messenger;
+
+          import org.telegram.tgnet.TLRPC;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+
+          public final class FluxExtras {
+              public static final boolean HIDE_ADS = @ADS@;
+              public static final boolean HIDE_CHANNEL_STORIES = @STORIES@;
+              public static final boolean HIDE_OWN_PHONE = @PHONE@;
+
+              private static final long[][] ANCHORS = {
+                  {2768409L, 1383264000L}, {7679610L, 1388448000L}, {11538514L, 1391212000L},
+                  {15835244L, 1392940000L}, {23646077L, 1393459000L}, {44634663L, 1399334000L},
+                  {46145305L, 1400198000L}, {54845238L, 1411257000L}, {63263518L, 1414454000L},
+                  {101260938L, 1425600000L}, {111220210L, 1429574000L}, {116812045L, 1437696000L},
+                  {125828524L, 1444003000L}, {157242073L, 1446768000L}, {171295414L, 1457481000L},
+                  {222021233L, 1465344000L}, {278941742L, 1473465000L}, {297621225L, 1481846000L},
+                  {337808429L, 1487707000L}, {400169472L, 1501459000L}, {805158066L, 1563208000L},
+                  {1974255900L, 1634000000L}
+              };
+
+              public static String maskOwnPhone(String text) {
+                  if (!HIDE_OWN_PHONE || text == null) {
+                      return null;
+                  }
+                  try {
+                      String digits = text.replaceAll("[^0-9]", "");
+                      if (digits.length() < 5) {
+                          return null;
+                      }
+                      for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+                          UserConfig uc = UserConfig.getInstance(a);
+                          if (uc == null || !uc.isClientActivated()) {
+                              continue;
+                          }
+                          TLRPC.User u = uc.getCurrentUser();
+                          if (u != null && u.phone != null && digits.equals(u.phone.replaceAll("[^0-9]", ""))) {
+                              return "Номер скрыт";
+                          }
+                      }
+                  } catch (Throwable e) {
+                      FileLog.e(e);
+                  }
+                  return null;
+              }
+
+              public static String registrationEstimate(long id) {
+                  if (id <= 0) {
+                      return "неизвестно";
+                  }
+                  long last = ANCHORS[ANCHORS.length - 1][0];
+                  if (id > last) {
+                      return "позже 2021";
+                  }
+                  long ts = ANCHORS[0][1];
+                  if (id >= ANCHORS[0][0]) {
+                      for (int i = 1; i < ANCHORS.length; i++) {
+                          if (id <= ANCHORS[i][0]) {
+                              long x0 = ANCHORS[i - 1][0], x1 = ANCHORS[i][0];
+                              long y0 = ANCHORS[i - 1][1], y1 = ANCHORS[i][1];
+                              ts = y0 + (y1 - y0) * (id - x0) / (x1 - x0);
+                              break;
+                          }
+                      }
+                  }
+                  return "≈ " + new SimpleDateFormat("LLLL yyyy", Locale.getDefault()).format(new Date(ts * 1000L));
+              }
+
+              public static String profileInfo(long userId) {
+                  String dc = "?";
+                  try {
+                      TLRPC.User u = MessagesController.getInstance(UserConfig.selectedAccount).getUser(userId);
+                      if (u != null && u.photo != null && u.photo.dc_id != 0) {
+                          dc = String.valueOf(u.photo.dc_id);
+                      }
+                  } catch (Throwable e) {
+                      FileLog.e(e);
+                  }
+                  return "ID " + userId + "  ·  DC " + dc + "  ·  " + registrationEstimate(userId);
+              }
+          }
+          '''
+          java = (EXTRAS.replace("@ADS@", jb(HIDE_ADS)).replace("@STORIES@", jb(HIDE_STORIES))
+                  .replace("@PHONE@", jb(HIDE_PHONE)))
+          wr(SRC + "/org/telegram/messenger/FluxExtras.java", java)
+          ok("FluxExtras.java создан (реклама=%s, истории каналов=%s, номер=%s)" % (HIDE_ADS, HIDE_STORIES, HIDE_PHONE))
+
+          # 1. Реклама
+          if HIDE_ADS:
+              p = find("MessagesController.java")
+              if p:
+                  s = rd(p)
+                  pat = re.compile(r'(?m)^([ \t]*public [\w.<>]+ getSponsoredMessages\([^)]*\)\s*\{\n)')
+                  if "FluxExtras.HIDE_ADS" in s:
+                      ok("Реклама: уже применено")
+                  elif len(pat.findall(s)) == 1:
+                      s = pat.sub(lambda m: m.group(1) + "        if (FluxExtras.HIDE_ADS) {\n            return null;\n        }\n", s, count=1)
+                      wr(p, s); ok("Реклама: getSponsoredMessages возвращает null")
+                  else:
+                      warn("Реклама: getSponsoredMessages не найден (нашлось %d), спонсорские сообщения не отключены" % len(pat.findall(s)))
+              else:
+                  warn("MessagesController.java не найден")
+
+          # 2. Истории каналов
+          if HIDE_STORIES:
+              p = find("StoriesController.java")
+              if p:
+                  s = rd(p)
+                  if "FluxExtras.HIDE_CHANNEL_STORIES" in s:
+                      ok("Истории каналов: уже применено")
+                  else:
+                      n = 0
+                      pat = re.compile(r'public (ArrayList<([\w.]+)>) getDialogListStories\(\)\s*\{')
+                      m = pat.search(s)
+                      if m:
+                          lt, et = m.group(1), m.group(2)
+                          wrapper = ("public %s getDialogListStories() {\n"
+                                     "        %s src = getDialogListStoriesFluxOrig();\n"
+                                     "        if (!org.telegram.messenger.FluxExtras.HIDE_CHANNEL_STORIES || src == null) {\n"
+                                     "            return src;\n"
+                                     "        }\n"
+                                     "        %s out = new ArrayList<>();\n"
+                                     "        for (%s ps : src) {\n"
+                                     "            if (ps != null && ps.peer != null && org.telegram.messenger.DialogObject.getPeerDialogId(ps.peer) < 0) {\n"
+                                     "                continue;\n"
+                                     "            }\n"
+                                     "            out.add(ps);\n"
+                                     "        }\n"
+                                     "        return out;\n"
+                                     "    }\n\n"
+                                     "    private %s getDialogListStoriesFluxOrig() {") % (lt, lt, lt, et, lt)
+                          s = s[:m.start()] + wrapper + s[m.end():]
+                          n += 1
+                          ok("Истории каналов: фильтр в getDialogListStories (лента сверху)")
+                      else:
+                          warn("Истории каналов: getDialogListStories не найден")
+                      for name in ("hasStories", "hasUnreadStories"):
+                          pm = re.compile(r'(public boolean %s\(long (\w+)\)\s*\{\n)' % name)
+                          mm = pm.search(s)
+                          if mm:
+                              s = s[:mm.end()] + "        if (org.telegram.messenger.FluxExtras.HIDE_CHANNEL_STORIES && %s < 0) {\n            return false;\n        }\n" % mm.group(2) + s[mm.end():]
+                              n += 1
+                              ok("Истории каналов: %s(dialogId<0) = false (кольцо у аватарок)" % name)
+                          else:
+                              warn("Истории каналов: %s(long) не найден" % name)
+                      if n:
+                          wr(p, s)
+              else:
+                  warn("StoriesController.java не найден")
+
+          # 3. Свой номер телефона
+          if HIDE_PHONE:
+              p = find("PhoneFormat.java")
+              if p:
+                  s = rd(p)
+                  pat = re.compile(r'(public String format\(String (\w+)\)\s*\{\n)')
+                  if "FluxExtras.maskOwnPhone" in s:
+                      ok("Номер: уже применено")
+                  elif len(pat.findall(s)) == 1:
+                      s = pat.sub(lambda m: m.group(1) +
+                          "        String fluxMasked = org.telegram.messenger.FluxExtras.maskOwnPhone(%s);\n"
+                          "        if (fluxMasked != null) {\n            return fluxMasked;\n        }\n" % m.group(2), s, count=1)
+                      wr(p, s); ok("Номер: свой номер заменён на «Номер скрыт» (меню, настройки, профиль)")
+                  else:
+                      warn("Номер: PhoneFormat.format(String) не найден (%d)" % len(pat.findall(s)))
+              else:
+                  warn("PhoneFormat.java не найден")
+
+          # 4. Секунды в времени сообщений
+          if SECONDS:
+              pl = find("LocaleController.java")
+              pc = find("ChatMessageCell.java")
+              if pl and pc:
+                  s = rd(pl)
+                  pat = re.compile(r'(?m)^([ \t]*)public FastDateFormat getFormatterDay\(\)')
+                  if "getFormatterDaySec" in s:
+                      ok("Секунды: LocaleController уже пропатчен")
+                      ready = True
+                  elif len(pat.findall(s)) == 1:
+                      add = ('    private FastDateFormat fluxDaySec;\n'
+                             '    private String fluxDaySecKey;\n\n'
+                             '    public FastDateFormat getFormatterDaySec() {\n'
+                             '        try {\n'
+                             '            java.util.Locale l = java.util.Locale.getDefault();\n'
+                             '            String key = l + "|" + is24HourFormat;\n'
+                             '            if (fluxDaySec == null || !key.equals(fluxDaySecKey)) {\n'
+                             '                fluxDaySec = FastDateFormat.getInstance(is24HourFormat ? "HH:mm:ss" : "h:mm:ss a", l);\n'
+                             '                fluxDaySecKey = key;\n'
+                             '            }\n'
+                             '            return fluxDaySec;\n'
+                             '        } catch (Throwable e) {\n'
+                             '            return getFormatterDay();\n'
+                             '        }\n'
+                             '    }\n\n')
+                      s = pat.sub(lambda m: add + m.group(0), s, count=1)
+                      wr(pl, s); ready = True
+                      ok("Секунды: getFormatterDaySec добавлен в LocaleController")
+                  else:
+                      ready = False
+                      warn("Секунды: getFormatterDay() не найден в LocaleController")
+                  if ready and re.search(r'\bis24HourFormat\b', rd(pl)):
+                      c = rd(pc)
+                      n = c.count("getFormatterDay()")
+                      if n and "getFormatterDaySec" not in c:
+                          wr(pc, c.replace("getFormatterDay()", "getFormatterDaySec()"))
+                          ok("Секунды: ChatMessageCell, замен: %d" % n)
+                      elif n == 0:
+                          warn("Секунды: в ChatMessageCell нет getFormatterDay()")
+                  elif ready:
+                      warn("Секунды: поле is24HourFormat не найдено — метод может не скомпилироваться")
+              else:
+                  warn("LocaleController.java или ChatMessageCell.java не найден")
+
+          # 5. ID / DC / дата регистрации в профиле (всё или ничего)
+          if DETAILS:
+              p = find("ProfileActivity.java")
+              if p:
+                  s = rd(p)
+                  if "fluxInfoRow" in s:
+                      ok("Профиль: уже применено")
+                  else:
+                      ai = s.find("class ListAdapter")
+                      cls = re.search(r'(public class ProfileActivity [^{]*\{\n)', s)
+                      hdr = re.compile(r'(?m)^([ \t]*)infoHeaderRow = rowCount\+\+;[ \t]*$')
+                      upd = re.search(r'(private void updateRowsIds\(\)\s*\{\n)', s)
+                      gvt = re.compile(r'(public int getItemViewType\(int position\)\s*\{\n)')
+                      bind = re.compile(r'TextDetailCell (\w+) = \(TextDetailCell\) holder\.itemView;\n')
+                      g = gvt.search(s, ai) if ai > 0 else None
+                      b = bind.search(s, ai) if ai > 0 else None
+                      good = (cls and upd and ai > 0 and g and b and hdr.search(s)
+                              and "VIEW_TYPE_TEXT_DETAIL" in s and re.search(r'\blong userId\b', s))
+                      if not good:
+                          warn("Профиль: якоря ProfileActivity не найдены (cls=%s upd=%s adapter=%s viewType=%s bind=%s header=%s) — ID/DC/дата не добавлены" % (
+                              bool(cls), bool(upd), ai > 0, bool(g), bool(b), bool(hdr.search(s))))
+                      else:
+                          # правки с конца файла к началу, чтобы не сбить позиции
+                          edits = []
+                          edits.append((b.end(), b.end(),
+                              "                    if (position == fluxInfoRow) {\n"
+                              "                        %s.setTextAndValue(org.telegram.messenger.FluxExtras.profileInfo(userId), \"ID · DC · регистрация\", false);\n"
+                              "                        return;\n"
+                              "                    }\n" % b.group(1)))
+                          edits.append((g.end(), g.end(),
+                              "        if (fluxInfoRow >= 0 && position == fluxInfoRow) {\n            return VIEW_TYPE_TEXT_DETAIL;\n        }\n"))
+                          edits.append((upd.end(), upd.end(), "        fluxInfoRow = -1;\n"))
+                          for m in hdr.finditer(s):
+                              edits.append((m.end(), m.end(), "\n" + m.group(1) + "fluxInfoRow = userId != 0 ? rowCount++ : -1;"))
+                          edits.append((cls.end(), cls.end(), "    private int fluxInfoRow = -1;\n"))
+                          for a, z, t in sorted(edits, key=lambda e: -e[0]):
+                              s = s[:a] + t + s[z:]
+                          wr(p, s)
+                          ok("Профиль: строка «ID · DC · регистрация» под заголовком информации")
+              else:
+                  warn("ProfileActivity.java не найден")
+
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
+              f.write("## FluxGram: скрытие лишнего, детали профиля, секунды\n```\n" + "\n".join(report) + "\n```\n")
           PY
 
       - name: Build APK
