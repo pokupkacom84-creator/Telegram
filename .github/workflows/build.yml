@@ -44,6 +44,14 @@ on:
         description: "FluxGram: частицы вокруг значка по умолчанию (в приложении выключаются в «Темы FluxGram»)"
         type: boolean
         default: true
+      keep_view_once:
+        description: "FluxGram: view-once медиа не удаляются после просмотра"
+        type: boolean
+        default: true
+      folder_rename:
+        description: "FluxGram: корневая папка Telegram/ -> FluxGram/ с миграцией данных"
+        type: boolean
+        default: true
 
 env:
   APP_NAME: FluxGram
@@ -57,6 +65,8 @@ env:
   GHOST_OFFLINE: ${{ inputs.ghost_offline }}
   MATERIAL_YOU: ${{ inputs.material_you }}
   BADGE_PARTICLES: ${{ inputs.badge_particles }}
+  KEEP_VIEW_ONCE: ${{ inputs.keep_view_once }}
+  FOLDER_RENAME: ${{ inputs.folder_rename }}
 
 defaults:
   run:
@@ -5864,6 +5874,278 @@ jobs:
             run_script patch_boringssl.sh
             run_script build_boringssl.sh
           } 2>&1 | tee "$GITHUB_WORKSPACE/native.log"
+
+      - name: "FluxGram: view-once и папка FluxGram/"
+        run: |
+          python3 - <<'PY'
+          import os, re, glob, sys
+
+          report = []
+          failed = []
+          def ok(m):   report.append("OK   " + m)
+          def warn(m): report.append("WARN " + m)
+          def fail(m): report.append("FAIL " + m); failed.append(m)
+
+          SRC = "TMessagesProj/src/main/java"
+          MSG = SRC + "/org/telegram/messenger"
+          keep_vo = os.environ.get("KEEP_VIEW_ONCE", "true") != "false"
+          rename  = os.environ.get("FOLDER_RENAME", "true") != "false"
+
+          def find(name):
+              r = glob.glob(SRC + "/**/" + name, recursive=True)
+              return r[0] if r else None
+
+          def rd(p): return open(p, encoding="utf-8").read()
+          def wr(p, s): open(p, "w", encoding="utf-8").write(s)
+
+          def patch(name, anchor, repl, label):
+              p = find(name)
+              if not p:
+                  fail(name + ": файл не найден (" + label + ")"); return False
+              s = rd(p)
+              if repl in s:
+                  ok(name + ": уже применено (" + label + ")"); return True
+              if s.count(anchor) != 1:
+                  fail(name + ": якорь найден %d раз (%s)" % (s.count(anchor), label)); return False
+              wr(p, s.replace(anchor, repl))
+              ok(name + ": " + label)
+              return True
+
+          FOLDER_JAVA = '''package org.telegram.messenger;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import java.io.File;
+          import java.io.FileInputStream;
+          import java.io.FileOutputStream;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+
+          public final class FluxFolderMigration {
+              public static final String APP_FOLDER = "FluxGram";
+              public static final String OLD_FOLDER = "Telegram";
+              private static final String PREF = "fluxgram_migration";
+              private static final String KEY_MIGRATED = "flux_folder_migrated_v1";
+              private static final String KEY_CLEANUP = "flux_folder_cleanup_old";
+
+              public static void migrateIfNeeded(final Context ctx) {
+                  if (ctx == null) {
+                      return;
+                  }
+                  final SharedPreferences p = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+                  if (p.getBoolean(KEY_MIGRATED, false)) {
+                      return;
+                  }
+                  Utilities.globalQueue.postRunnable(() -> {
+                      try {
+                          File[] bases = { ctx.getExternalFilesDir(null), ctx.getFilesDir(),
+                                           ctx.getExternalCacheDir(), ctx.getCacheDir() };
+                          boolean allOk = true;
+                          for (File base : bases) {
+                              if (base == null) continue;
+                              File oldDir = new File(base, OLD_FOLDER);
+                              if (!oldDir.isDirectory()) continue;
+                              try {
+                                  copyDir(oldDir, new File(base, APP_FOLDER));
+                                  if (p.getBoolean(KEY_CLEANUP, false)) {
+                                      deleteDir(oldDir);
+                                  }
+                              } catch (Throwable e) {
+                                  allOk = false;
+                                  FileLog.e(e);
+                              }
+                          }
+                          if (allOk) {
+                              p.edit().putBoolean(KEY_MIGRATED, true).apply();
+                          }
+                      } catch (Throwable e) {
+                          FileLog.e(e);
+                      }
+                  });
+              }
+
+              private static void copyDir(File src, File dst) throws Exception {
+                  if (src.isDirectory()) {
+                      if (!dst.exists() && !dst.mkdirs()) throw new Exception("mkdirs " + dst);
+                      File[] children = src.listFiles();
+                      if (children == null) return;
+                      for (File c : children) copyDir(c, new File(dst, c.getName()));
+                  } else {
+                      if (dst.exists() && dst.length() == src.length()) return;
+                      try (InputStream in = new FileInputStream(src);
+                           OutputStream out = new FileOutputStream(dst)) {
+                          byte[] buf = new byte[65536];
+                          int n;
+                          while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                      }
+                  }
+              }
+
+              private static void deleteDir(File f) {
+                  File[] children = f.listFiles();
+                  if (children != null) for (File c : children) deleteDir(c);
+                  f.delete();
+              }
+          }
+          '''
+
+          VO_JAVA = '''package org.telegram.messenger;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import org.telegram.tgnet.TLRPC;
+          import java.io.File;
+          import java.util.HashSet;
+          import java.util.Set;
+
+          public final class FluxViewOnce {
+              public static final String PREF = "fluxgram_viewonce";
+              public static final String KEY_KEEP = "flux_keep_view_once";
+              private static final String KEY_FILES = "flux_view_once_files";
+              private static Set<String> protectedNames;
+
+              private static SharedPreferences prefs() {
+                  return ApplicationLoader.applicationContext.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+              }
+
+              public static boolean keepEnabled() {
+                  try {
+                      return prefs().getBoolean(KEY_KEEP, true);
+                  } catch (Throwable e) {
+                      return false;
+                  }
+              }
+
+              public static void setKeepEnabled(boolean value) {
+                  prefs().edit().putBoolean(KEY_KEEP, value).apply();
+              }
+
+              // view-once / одноразовое медиа обычных чатов; секретные чаты с таймером не трогаем
+              public static boolean isViewOnce(MessageObject m) {
+                  if (m == null || m.messageOwner == null || m.messageOwner instanceof TLRPC.TL_message_secret) {
+                      return false;
+                  }
+                  TLRPC.MessageMedia media = MessageObject.getMedia(m.messageOwner);
+                  return media != null && media.ttl_seconds != 0;
+              }
+
+              public static boolean shouldKeep(MessageObject m) {
+                  return keepEnabled() && isViewOnce(m);
+              }
+
+              private static synchronized Set<String> names() {
+                  if (protectedNames == null) {
+                      protectedNames = new HashSet<>(prefs().getStringSet(KEY_FILES, new HashSet<String>()));
+                  }
+                  return protectedNames;
+              }
+
+              public static synchronized void protect(File f) {
+                  if (f == null) return;
+                  if (names().add(f.getName())) {
+                      prefs().edit().putStringSet(KEY_FILES, new HashSet<>(names())).apply();
+                  }
+              }
+
+              public static synchronized boolean isProtected(File f) {
+                  return f != null && keepEnabled() && names().contains(f.getName());
+              }
+          }
+          '''
+
+          if keep_vo:
+              wr(MSG + "/FluxViewOnce.java", VO_JAVA); ok("создан FluxViewOnce.java")
+
+              # SecretMediaViewer: не считаем сообщение удаляемым, защищаем файл от очистки
+              patch("SecretMediaViewer.java",
+                    "        ignoreDelete = messageObject.messageOwner.ttl == 0x7FFFFFFF;\n",
+                    "        ignoreDelete = messageObject.messageOwner.ttl == 0x7FFFFFFF || org.telegram.messenger.FluxViewOnce.shouldKeep(messageObject);\n"
+                    "        if (org.telegram.messenger.FluxViewOnce.shouldKeep(messageObject)) {\n"
+                    "            org.telegram.messenger.FluxViewOnce.protect(FileLoader.getInstance(currentAccount).getPathToMessage(messageObject.messageOwner));\n"
+                    "        }\n",
+                    "ignoreDelete + защита файла")
+              patch("SecretMediaViewer.java",
+                    "                        currentMessageObject.messageOwner.destroyTime = key;\n",
+                    "                        if (!org.telegram.messenger.FluxViewOnce.shouldKeep(currentMessageObject)) {\n"
+                    "                            currentMessageObject.messageOwner.destroyTime = key;\n"
+                    "                        }\n",
+                    "не выставлять destroyTime для view-once")
+
+              # FileLoader.deleteFiles: не удалять защищённые файлы
+              patch("FileLoader.java",
+                    "                File file = files.get(a);\n                File encrypted = new File(file.getAbsolutePath() + \".enc\");\n",
+                    "                File file = files.get(a);\n"
+                    "                if (FluxViewOnce.isProtected(file)) {\n"
+                    "                    continue;\n"
+                    "                }\n"
+                    "                File encrypted = new File(file.getAbsolutePath() + \".enc\");\n",
+                    "deleteFiles пропускает защищённые view-once файлы")
+
+              # Где ещё живёт удаление по таймеру (в загруженных файлах его нет)
+              hits = []
+              for path in glob.glob(SRC + "/**/*.java", recursive=True):
+                  if not re.search(r'(MessagesStorage|MessagesController)\.java$', path):
+                      continue
+                  for i, line in enumerate(open(path, encoding="utf-8", errors="ignore"), 1):
+                      if "destroyTime" in line or ("ttl_seconds" in line and "Empty" in line):
+                          hits.append("%s:%d: %s" % (os.path.basename(path), i, line.strip()[:140]))
+              report.append("Точки, где клиент гасит view-once после просмотра (нужны правки в MessagesStorage/MessagesController):")
+              report.extend("  " + h for h in hits[:40])
+              for path in glob.glob(SRC + "/**/*.java", recursive=True):
+                  if re.search(r'SpySettingsActivity|FluxHubActivity|SpyMode', os.path.basename(path)):
+                      report.append("  найден файл настроек: " + path)
+
+          if rename:
+              wr(MSG + "/FluxFolderMigration.java", FOLDER_JAVA); ok("создан FluxFolderMigration.java")
+              changed = 0
+              pat = re.compile(r'(new File\([^;\n]*?),\s*"Telegram"\)')
+              for path in glob.glob(SRC + "/**/*.java", recursive=True):
+                  if path.endswith("FluxFolderMigration.java"):
+                      continue
+                  s = rd(path)
+                  def sub(m):
+                      global changed
+                      if "getExternalStorageDirectory" in m.group(1):
+                          warn("%s: legacy-путь sdcard/Telegram оставлен как есть" % os.path.basename(path))
+                          return m.group(0)
+                      changed += 1
+                      return m.group(1) + ", org.telegram.messenger.FluxFolderMigration.APP_FOLDER)"
+                  n = pat.sub(sub, s)
+                  if n != s:
+                      wr(path, n); ok("%s: корень Telegram -> APP_FOLDER" % os.path.basename(path))
+              if changed:
+                  patch("ApplicationLoader.java",
+                        "        // AndroidUtilities must be initialized before FileLog\n",
+                        "        FluxFolderMigration.migrateIfNeeded(applicationContext);\n\n"
+                        "        // AndroidUtilities must be initialized before FileLog\n",
+                        "вызов миграции папки")
+              else:
+                  warn("не найдено ни одного new File(..., \"Telegram\"): имя корня, видимо, в другом виде (ImageLoader.createMediaPaths?) — "
+                       "миграция НЕ подключена, чтобы не дублировать данные")
+              hits = []
+              for path in glob.glob(SRC + "/**/*.java", recursive=True):
+                  for i, line in enumerate(open(path, encoding="utf-8", errors="ignore"), 1):
+                      if re.search(r'"Telegram"', line) and re.search(r'File|Dir|Path|path', line):
+                          hits.append("%s:%d: %s" % (os.path.basename(path), i, line.strip()[:140]))
+              report.append("Оставшиеся \"Telegram\" рядом с путями (проверить вручную):")
+              report.extend("  " + h for h in hits[:30])
+
+          checklist = [
+              "",
+              "### Чек-лист после установки APK",
+              "- [ ] В Android/data/com.fluxgram.app/files/ есть FluxGram/, данные на месте",
+              "- [ ] Стикеры, аватары и скачанные медиа не пропали",
+              "- [ ] Отправка, получение и «Поделиться» работают",
+              "- [ ] View-once фото открывается повторно (переключатель включён)",
+              "- [ ] Обычные самоуничтожающиеся сообщения в секретных чатах исчезают как раньше",
+          ]
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
+              f.write("## FluxGram: view-once и папка FluxGram/\n```\n" + "\n".join(report) + "\n```\n" + "\n".join(checklist) + "\n")
+          print("\n".join(report))
+          if failed:
+              print("::error::Часть патчей не применилась: " + "; ".join(failed))
+              sys.exit(1)
+          PY
 
       - name: Build APK
         run: |
