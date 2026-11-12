@@ -679,6 +679,46 @@ jobs:
 
           grep -rnE '"Telegram[^"/:.]*"' TMessagesProj/src/main/java --include=*.java | grep -v "LocaleController.java" | head -60 || true
 
+      - name: Заголовок списка чатов (ActionBar.setTitle) → FluxGram
+        if: ${{ env.REBRAND != 'false' }}
+        run: |
+          python3 - <<'PY'
+          import re, os, sys
+
+          NAME = os.environ["APP_NAME"]
+          p = "TMessagesProj/src/main/java/org/telegram/ui/ActionBar/ActionBar.java"
+          s = open(p, encoding="utf-8").read()
+
+          if "fluxTitle(" in s:
+              print("хук уже стоит")
+              sys.exit(0)
+
+          pat = re.compile(
+              r'(public\s+void\s+(?:setTitle|setTitleAnimated)\w*\s*\(\s*CharSequence\s+(\w+)\s*[^)]*\)\s*\{)')
+          cnt = [0]
+          def sub(m):
+              cnt[0] += 1
+              return m.group(1) + " " + m.group(2) + " = fluxTitle(" + m.group(2) + ");"
+          s = pat.sub(sub, s)
+
+          cls = re.search(r'public\s+class\s+ActionBar\b[^{]*\{', s)
+          if cnt[0] == 0 or not cls:
+              print("::warning::ActionBar.setTitle не найден")
+              for line in s.split("\n"):
+                  if "setTitle" in line and "(" in line:
+                      print("SIG:", line.strip())
+              sys.exit(0)
+
+          helper = ('\n    private static CharSequence fluxTitle(CharSequence c) {'
+                    ' if (c != null) { String t = c.toString(); if (t.equals("Telegram") || t.equals("Telegram Beta")) return "' + NAME + '"; }'
+                    ' return c; }\n')
+          s = s[:cls.end()] + helper + s[cls.end():]
+          open(p, "w", encoding="utf-8").write(s)
+          print("ActionBar: хук в методов:", cnt[0])
+          PY
+
+          grep -rnE 'AppName' TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java | head -20 || true
+
       - name: Режим шпиона (SpyMode + хук в MessagesController)
         run: |
           python3 - <<'PY'
