@@ -8825,6 +8825,7 @@ jobs:
           import android.graphics.Paint;
           import android.graphics.Path;
           import android.graphics.RectF;
+          import android.os.SystemClock;
           import android.view.Choreographer;
           import android.view.View;
 
@@ -8832,7 +8833,8 @@ jobs:
 
           /**
            * FluxGram: настраиваемый M3E loading indicator (Canvas + Path, minSdk 21).
-           * ~30 fps через Choreographer, рисуем только когда view показан.
+           * View: ~30 fps через Choreographer, рисуем только когда view показан.
+           * drawRadial(): подмена отрисовки системного RadialProgressView (его кадры ведёт сам RadialProgressView).
            */
           public class FluxLoadingIndicator extends View {
 
@@ -8851,33 +8853,59 @@ jobs:
               public static final String[] STYLE_NAMES = {"Морфинг форм", "Кольцо", "Волнистое кольцо", "Точки", "Орбита", "Комета", "Классика"};
 
               private static final Style[] STYLES = Style.values();
-              private static final int PTS = 48;
-              private static final int WAVES = 7;
-              private static final int TAIL = 14;
-              // круг, треугольник, квадрат, пятиугольник, цветок, солнце, овал
-              private static final int[] SHAPE_N = {0, 3, 4, 5, 6, 8, 2};
-              private static final float[] SHAPE_A = {0f, 0.22f, 0.15f, 0.14f, 0.20f, 0.13f, 0.18f};
-              private static final float[][] SHAPE_COS = new float[SHAPE_N.length][PTS];
-              private static final float[] COS_T = new float[PTS];
-              private static final float[] SIN_T = new float[PTS];
 
-              static {
-                  for (int i = 0; i < PTS; i++) {
-                      double th = 2.0 * Math.PI * i / PTS;
-                      COS_T[i] = (float) Math.cos(th);
-                      SIN_T[i] = (float) Math.sin(th);
-                      for (int s = 0; s < SHAPE_N.length; s++) {
-                          SHAPE_COS[s][i] = (float) Math.cos(SHAPE_N[s] * th);
-                      }
+              // ---------------------------------------------------------------- settings cache for drawRadial
+
+              private static final Renderer SHARED = new Renderer();
+              private static Style cStyle = Style.SHAPE_MORPH;
+              private static float cSpeed = 1f;
+              private static boolean cReplace = true;
+              private static long cLoadedAt = -100000;
+
+              static Style styleFromSettings() {
+                  int st = FluxStyle.num(FluxStyle.K_LOADER_STYLE, 0);
+                  return STYLES[Math.max(0, Math.min(STYLES.length - 1, st))];
+              }
+
+              static float speedFromSettings() {
+                  return Math.max(0.25f, Math.min(3f, FluxStyle.num(FluxStyle.K_LOADER_SPEED, 100) / 100f));
+              }
+
+              /** Сбросить кэш настроек (вызывать после изменения K_LOADER_*). */
+              public static void reloadSettings() {
+                  cLoadedAt = -100000;
+              }
+
+              private static void ensureSettings() {
+                  long now = SystemClock.uptimeMillis();
+                  if (now - cLoadedAt > 1000) {
+                      cLoadedAt = now;
+                      cStyle = styleFromSettings();
+                      cSpeed = speedFromSettings();
+                      cReplace = FluxStyle.bool(FluxStyle.K_LOADER_REPLACE, true);
                   }
               }
 
-              private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-              private final Path path = new Path();
-              private final RectF rect = new RectF();
-              private final float[] px = new float[PTS];
-              private final float[] py = new float[PTS];
+              /**
+               * Хук для RadialProgressView. true - индикатор нарисован, оригинальный drawArc пропускаем.
+               */
+              public static boolean drawRadial(Canvas c, RectF r, boolean indeterminate, float progress, int color, float toCircle) {
+                  try {
+                      ensureSettings();
+                      if (!cReplace || toCircle > 0f || r.width() < AndroidUtilities.dp(8)) {
+                          return false;
+                      }
+                      SHARED.draw(c, r.centerX(), r.centerY(), Math.min(r.width(), r.height()) / 2f, color, cStyle,
+                              SystemClock.uptimeMillis() * (double) cSpeed, indeterminate, progress);
+                      return true;
+                  } catch (Throwable t) {
+                      return false;
+                  }
+              }
 
+              // ---------------------------------------------------------------- view
+
+              private final Renderer renderer = SHARED;
               private Style style = Style.SHAPE_MORPH;
               private Size size;
               private boolean indeterminate = true;
@@ -8892,8 +8920,6 @@ jobs:
               private int skip;
               private long lastNanos;
               private double clock;
-              private float arcStart;
-              private float arcSweep;
 
               private final Choreographer.FrameCallback frame = new Choreographer.FrameCallback() {
                   @Override
@@ -8938,9 +8964,10 @@ jobs:
 
               /** Стиль и скорость из настроек FluxGram. */
               public void applySettings() {
-                  int st = FluxStyle.num(FluxStyle.K_LOADER_STYLE, 0);
-                  style = STYLES[Math.max(0, Math.min(STYLES.length - 1, st))];
-                  setSpeed(FluxStyle.num(FluxStyle.K_LOADER_SPEED, 100) / 100f);
+                  reloadSettings();
+                  style = styleFromSettings();
+                  setSpeed(speedFromSettings());
+                  invalidate();
               }
 
               public void setStyle(Style s) {
@@ -9043,8 +9070,6 @@ jobs:
                   Choreographer.getInstance().removeFrameCallback(frame);
               }
 
-              // ---------------------------------------------------------------- draw
-
               @Override
               protected void onDraw(Canvas c) {
                   int w = getWidth();
@@ -9052,233 +9077,273 @@ jobs:
                   if (w <= 0 || h <= 0) {
                       return;
                   }
-                  float cx = w / 2f;
-                  float cy = h / 2f;
-                  float half = Math.min(w, h) / 2f;
                   int col = hasColor ? color : Theme.getColor(Theme.key_progressCircle);
-                  switch (style) {
-                      case SHAPE_MORPH:
-                          drawMorph(c, cx, cy, half, col);
-                          break;
-                      case RING:
-                          drawRing(c, cx, cy, half, col, false);
-                          break;
-                      case WAVY_RING:
-                          drawWavy(c, cx, cy, half, col);
-                          break;
-                      case DOTS:
-                          drawDots(c, cx, cy, half, col);
-                          break;
-                      case ORBIT:
-                          drawOrbit(c, cx, cy, half, col);
-                          break;
-                      case COMET:
-                          drawComet(c, cx, cy, half, col);
-                          break;
-                      default:
-                          drawRing(c, cx, cy, half, col, true);
-                          break;
-                  }
+                  renderer.draw(c, w / 2f, h / 2f, Math.min(w, h) / 2f, col, style, clock, indeterminate, shown);
               }
 
-              private static int alphaOf(int col, float a) {
-                  int al = (int) ((col >>> 24) * Math.max(0f, Math.min(255f, a)) / 255f);
-                  return (al << 24) | (col & 0xFFFFFF);
-              }
+              // ---------------------------------------------------------------- renderer (без аллокаций в draw)
 
-              private static float spring(float t) {
-                  if (t <= 0f) {
-                      return 0f;
-                  }
-                  if (t >= 1f) {
-                      return 1f;
-                  }
-                  return (float) (1.0 - Math.exp(-7.0 * t) * Math.cos(14.0 * t));
-              }
+              static final class Renderer {
+                  private static final int PTS = 48;
+                  private static final int WAVES = 7;
+                  private static final int TAIL = 14;
+                  // круг, треугольник, квадрат, пятиугольник, цветок, солнце, овал
+                  private static final int[] SHAPE_N = {0, 3, 4, 5, 6, 8, 2};
+                  private static final float[] SHAPE_A = {0f, 0.22f, 0.15f, 0.14f, 0.20f, 0.13f, 0.18f};
+                  private static final float[][] SHAPE_COS = new float[SHAPE_N.length][PTS];
+                  private static final float[] COS_T = new float[PTS];
+                  private static final float[] SIN_T = new float[PTS];
 
-              private float phase(double period) {
-                  return (float) ((clock % period) / period);
-              }
-
-              private void computeArc(boolean classic) {
-                  if (indeterminate) {
-                      if (classic) {
-                          arcSweep = 270f;
-                          arcStart = -90f + (float) ((clock * 0.40) % 360.0);
-                      } else {
-                          float ph = phase(1400);
-                          arcSweep = 30f + 240f * (0.5f - 0.5f * (float) Math.cos(2.0 * Math.PI * ph));
-                          arcStart = -90f + (float) ((clock * 0.26) % 360.0);
-                      }
-                  } else {
-                      arcSweep = Math.max(3f, 360f * shown);
-                      arcStart = -90f;
-                  }
-              }
-
-              private void drawRing(Canvas c, float cx, float cy, float half, int col, boolean classic) {
-                  float stroke = Math.max(AndroidUtilities.dpf2(1.5f), half * 0.2f);
-                  float r = half - stroke / 2f - 0.5f;
-                  paint.setStyle(Paint.Style.STROKE);
-                  paint.setStrokeCap(Paint.Cap.ROUND);
-                  paint.setStrokeWidth(stroke);
-                  if (!classic) {
-                      paint.setColor(alphaOf(col, 38));
-                      c.drawCircle(cx, cy, r, paint);
-                  }
-                  paint.setColor(col);
-                  computeArc(classic);
-                  rect.set(cx - r, cy - r, cx + r, cy + r);
-                  c.drawArc(rect, arcStart, arcSweep, false, paint);
-              }
-
-              private void buildWavy(float cx, float cy, float a0, float sweep, float r, float amp, float ph) {
-                  path.rewind();
-                  int n = Math.max(2, (int) (sweep / 4f));
-                  for (int i = 0; i <= n; i++) {
-                      double a = Math.toRadians(a0 + sweep * i / n);
-                      float rr = r + amp * (float) Math.sin(WAVES * a + ph);
-                      float x = cx + rr * (float) Math.cos(a);
-                      float y = cy + rr * (float) Math.sin(a);
-                      if (i == 0) {
-                          path.moveTo(x, y);
-                      } else {
-                          path.lineTo(x, y);
-                      }
-                  }
-              }
-
-              private void drawWavy(Canvas c, float cx, float cy, float half, int col) {
-                  float stroke = Math.max(AndroidUtilities.dpf2(1.5f), half * 0.17f);
-                  float amp = stroke * 0.65f;
-                  float r = half - stroke / 2f - amp - 0.5f;
-                  float ph = (float) ((clock * 0.006) % (2.0 * Math.PI));
-                  paint.setStyle(Paint.Style.STROKE);
-                  paint.setStrokeCap(Paint.Cap.ROUND);
-                  paint.setStrokeJoin(Paint.Join.ROUND);
-                  paint.setStrokeWidth(stroke);
-                  buildWavy(cx, cy, 0f, 360f, r, amp, ph);
-                  paint.setColor(alphaOf(col, 38));
-                  c.drawPath(path, paint);
-                  computeArc(false);
-                  buildWavy(cx, cy, arcStart, arcSweep, r, amp, ph);
-                  paint.setColor(col);
-                  c.drawPath(path, paint);
-              }
-
-              private void drawMorph(Canvas c, float cx, float cy, float half, int col) {
-                  int k = SHAPE_N.length;
-                  int s0;
-                  int s1;
-                  float u;
-                  float scale;
-                  if (indeterminate) {
-                      double st = clock / 700.0;
-                      int idx = (int) st;
-                      s0 = idx % k;
-                      s1 = (s0 + 1) % k;
-                      float f = (float) (st - idx);
-                      u = spring(Math.min(1f, f / 0.6f));
-                      scale = 1f;
-                  } else {
-                      float pos = shown * (k - 1);
-                      int i = Math.max(0, Math.min(k - 2, (int) pos));
-                      s0 = i;
-                      s1 = i + 1;
-                      u = pos - i;
-                      scale = 0.55f + 0.45f * shown;
-                  }
-                  double rot = (clock * 0.09) % 360.0;
-                  float cr = (float) Math.cos(Math.toRadians(rot));
-                  float sr = (float) Math.sin(Math.toRadians(rot));
-                  float rad = half * 0.75f * scale;
-                  float a0 = SHAPE_A[s0];
-                  float a1 = SHAPE_A[s1];
-                  float[] c0 = SHAPE_COS[s0];
-                  float[] c1 = SHAPE_COS[s1];
-                  for (int i = 0; i < PTS; i++) {
-                      float rr = rad * ((1f - u) * (1f + a0 * c0[i]) + u * (1f + a1 * c1[i]));
-                      float x = COS_T[i] * cr - SIN_T[i] * sr;
-                      float y = SIN_T[i] * cr + COS_T[i] * sr;
-                      px[i] = cx + rr * x;
-                      py[i] = cy + rr * y;
-                  }
-                  path.rewind();
-                  path.moveTo((px[PTS - 1] + px[0]) / 2f, (py[PTS - 1] + py[0]) / 2f);
-                  for (int i = 0; i < PTS; i++) {
-                      int nx = (i + 1) % PTS;
-                      path.quadTo(px[i], py[i], (px[i] + px[nx]) / 2f, (py[i] + py[nx]) / 2f);
-                  }
-                  path.close();
-                  paint.setStyle(Paint.Style.FILL);
-                  paint.setColor(col);
-                  c.drawPath(path, paint);
-              }
-
-              private void drawDots(Canvas c, float cx, float cy, float half, int col) {
-                  float gap = half * 0.62f;
-                  float dr = half * 0.2f;
-                  paint.setStyle(Paint.Style.FILL);
-                  for (int i = 0; i < 3; i++) {
-                      float y = cy;
-                      float r;
-                      float a;
-                      if (indeterminate) {
-                          float t = (float) (((clock / 1000.0) - i * 0.15) % 1.0);
-                          if (t < 0f) {
-                              t += 1f;
+                  static {
+                      for (int i = 0; i < PTS; i++) {
+                          double th = 2.0 * Math.PI * i / PTS;
+                          COS_T[i] = (float) Math.cos(th);
+                          SIN_T[i] = (float) Math.sin(th);
+                          for (int s = 0; s < SHAPE_N.length; s++) {
+                              SHAPE_COS[s][i] = (float) Math.cos(SHAPE_N[s] * th);
                           }
-                          float b = t < 0.5f ? (float) Math.sin(2.0 * Math.PI * t) : 0f;
-                          y = cy - b * half * 0.35f;
-                          r = dr * (1f + 0.3f * b);
-                          a = 140f + 115f * b;
-                      } else {
-                          float kf = Math.max(0f, Math.min(1f, shown * 3f - i));
-                          r = dr * (0.8f + 0.2f * kf);
-                          a = 70f + 185f * kf;
                       }
-                      paint.setColor(alphaOf(col, a));
-                      c.drawCircle(cx + (i - 1) * gap, y, r, paint);
                   }
-              }
 
-              private void drawOrbit(Canvas c, float cx, float cy, float half, int col) {
-                  float orbit = half * 0.72f;
-                  paint.setStyle(Paint.Style.STROKE);
-                  paint.setStrokeWidth(Math.max(1f, half * 0.06f));
-                  paint.setColor(alphaOf(col, 40));
-                  c.drawCircle(cx, cy, orbit, paint);
-                  double a = Math.toRadians((clock * 0.28) % 360.0);
-                  paint.setStyle(Paint.Style.FILL);
-                  paint.setColor(col);
-                  c.drawCircle(cx + orbit * (float) Math.cos(a), cy + orbit * (float) Math.sin(a), half * 0.17f, paint);
-                  paint.setColor(alphaOf(col, 150));
-                  c.drawCircle(cx - orbit * (float) Math.cos(a), cy - orbit * (float) Math.sin(a), half * 0.12f, paint);
-                  float cs = indeterminate ? 1f + 0.15f * (float) Math.sin(clock / 220.0) : 0.5f + 0.5f * shown;
-                  paint.setColor(col);
-                  c.drawCircle(cx, cy, half * 0.14f * cs, paint);
-              }
+                  private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Path path = new Path();
+                  private final RectF rect = new RectF();
+                  private final float[] px = new float[PTS];
+                  private final float[] py = new float[PTS];
+                  private double clock;
+                  private boolean indeterminate;
+                  private float shown;
+                  private float arcStart;
+                  private float arcSweep;
 
-              private void drawComet(Canvas c, float cx, float cy, float half, int col) {
-                  float orbit = half * 0.72f;
-                  double head;
-                  if (indeterminate) {
-                      head = Math.toRadians(-90.0 + (clock * 0.33) % 360.0);
-                  } else {
-                      head = Math.toRadians(-90.0 + 360.0 * shown);
+                  void draw(Canvas c, float cx, float cy, float half, int col, Style style, double clock, boolean indeterminate, float shown) {
+                      this.clock = clock;
+                      this.indeterminate = indeterminate;
+                      this.shown = Math.max(0f, Math.min(1f, shown));
+                      switch (style) {
+                          case SHAPE_MORPH:
+                              drawMorph(c, cx, cy, half, col);
+                              break;
+                          case RING:
+                              drawRing(c, cx, cy, half, col, false);
+                              break;
+                          case WAVY_RING:
+                              drawWavy(c, cx, cy, half, col);
+                              break;
+                          case DOTS:
+                              drawDots(c, cx, cy, half, col);
+                              break;
+                          case ORBIT:
+                              drawOrbit(c, cx, cy, half, col);
+                              break;
+                          case COMET:
+                              drawComet(c, cx, cy, half, col);
+                              break;
+                          default:
+                              drawRing(c, cx, cy, half, col, true);
+                              break;
+                      }
+                  }
+
+                  private int alphaOf(int col, float a) {
+                      int al = (int) ((col >>> 24) * Math.max(0f, Math.min(255f, a)) / 255f);
+                      return (al << 24) | (col & 0xFFFFFF);
+                  }
+
+                  private float spring(float t) {
+                      if (t <= 0f) {
+                          return 0f;
+                      }
+                      if (t >= 1f) {
+                          return 1f;
+                      }
+                      return (float) (1.0 - Math.exp(-7.0 * t) * Math.cos(14.0 * t));
+                  }
+
+                  private float phase(double period) {
+                      return (float) ((clock % period) / period);
+                  }
+
+                  private void computeArc(boolean classic) {
+                      if (indeterminate) {
+                          if (classic) {
+                              arcSweep = 270f;
+                              arcStart = -90f + (float) ((clock * 0.40) % 360.0);
+                          } else {
+                              float ph = phase(1400);
+                              arcSweep = 30f + 240f * (0.5f - 0.5f * (float) Math.cos(2.0 * Math.PI * ph));
+                              arcStart = -90f + (float) ((clock * 0.26) % 360.0);
+                          }
+                      } else {
+                          arcSweep = Math.max(3f, 360f * shown);
+                          arcStart = -90f;
+                      }
+                  }
+
+                  private void drawRing(Canvas c, float cx, float cy, float half, int col, boolean classic) {
+                      float stroke = Math.max(AndroidUtilities.dpf2(1.5f), half * 0.2f);
+                      float r = half - stroke / 2f - 0.5f;
+                      paint.setStyle(Paint.Style.STROKE);
+                      paint.setStrokeCap(Paint.Cap.ROUND);
+                      paint.setStrokeWidth(stroke);
+                      if (!classic) {
+                          paint.setColor(alphaOf(col, 38));
+                          c.drawCircle(cx, cy, r, paint);
+                      }
+                      paint.setColor(col);
+                      computeArc(classic);
+                      rect.set(cx - r, cy - r, cx + r, cy + r);
+                      c.drawArc(rect, arcStart, arcSweep, false, paint);
+                  }
+
+                  private void buildWavy(float cx, float cy, float a0, float sweep, float r, float amp, float ph) {
+                      path.rewind();
+                      int n = Math.max(2, (int) (sweep / 4f));
+                      for (int i = 0; i <= n; i++) {
+                          double a = Math.toRadians(a0 + sweep * i / n);
+                          float rr = r + amp * (float) Math.sin(WAVES * a + ph);
+                          float x = cx + rr * (float) Math.cos(a);
+                          float y = cy + rr * (float) Math.sin(a);
+                          if (i == 0) {
+                              path.moveTo(x, y);
+                          } else {
+                              path.lineTo(x, y);
+                          }
+                      }
+                  }
+
+                  private void drawWavy(Canvas c, float cx, float cy, float half, int col) {
+                      float stroke = Math.max(AndroidUtilities.dpf2(1.5f), half * 0.17f);
+                      float amp = stroke * 0.65f;
+                      float r = half - stroke / 2f - amp - 0.5f;
+                      float ph = (float) ((clock * 0.006) % (2.0 * Math.PI));
+                      paint.setStyle(Paint.Style.STROKE);
+                      paint.setStrokeCap(Paint.Cap.ROUND);
+                      paint.setStrokeJoin(Paint.Join.ROUND);
+                      paint.setStrokeWidth(stroke);
+                      buildWavy(cx, cy, 0f, 360f, r, amp, ph);
+                      paint.setColor(alphaOf(col, 38));
+                      c.drawPath(path, paint);
+                      computeArc(false);
+                      buildWavy(cx, cy, arcStart, arcSweep, r, amp, ph);
+                      paint.setColor(col);
+                      c.drawPath(path, paint);
+                  }
+
+                  private void drawMorph(Canvas c, float cx, float cy, float half, int col) {
+                      int k = SHAPE_N.length;
+                      int s0;
+                      int s1;
+                      float u;
+                      float scale;
+                      if (indeterminate) {
+                          double st = clock / 700.0;
+                          int idx = (int) st;
+                          s0 = idx % k;
+                          s1 = (s0 + 1) % k;
+                          float f = (float) (st - idx);
+                          u = spring(Math.min(1f, f / 0.6f));
+                          scale = 1f;
+                      } else {
+                          float pos = shown * (k - 1);
+                          int i = Math.max(0, Math.min(k - 2, (int) pos));
+                          s0 = i;
+                          s1 = i + 1;
+                          u = pos - i;
+                          scale = 0.55f + 0.45f * shown;
+                      }
+                      double rot = (clock * 0.09) % 360.0;
+                      float cr = (float) Math.cos(Math.toRadians(rot));
+                      float sr = (float) Math.sin(Math.toRadians(rot));
+                      float rad = half * 0.75f * scale;
+                      float a0 = SHAPE_A[s0];
+                      float a1 = SHAPE_A[s1];
+                      float[] c0 = SHAPE_COS[s0];
+                      float[] c1 = SHAPE_COS[s1];
+                      for (int i = 0; i < PTS; i++) {
+                          float rr = rad * ((1f - u) * (1f + a0 * c0[i]) + u * (1f + a1 * c1[i]));
+                          float x = COS_T[i] * cr - SIN_T[i] * sr;
+                          float y = SIN_T[i] * cr + COS_T[i] * sr;
+                          px[i] = cx + rr * x;
+                          py[i] = cy + rr * y;
+                      }
+                      path.rewind();
+                      path.moveTo((px[PTS - 1] + px[0]) / 2f, (py[PTS - 1] + py[0]) / 2f);
+                      for (int i = 0; i < PTS; i++) {
+                          int nx = (i + 1) % PTS;
+                          path.quadTo(px[i], py[i], (px[i] + px[nx]) / 2f, (py[i] + py[nx]) / 2f);
+                      }
+                      path.close();
+                      paint.setStyle(Paint.Style.FILL);
+                      paint.setColor(col);
+                      c.drawPath(path, paint);
+                  }
+
+                  private void drawDots(Canvas c, float cx, float cy, float half, int col) {
+                      float gap = half * 0.62f;
+                      float dr = half * 0.2f;
+                      paint.setStyle(Paint.Style.FILL);
+                      for (int i = 0; i < 3; i++) {
+                          float y = cy;
+                          float r;
+                          float a;
+                          if (indeterminate) {
+                              float t = (float) (((clock / 1000.0) - i * 0.15) % 1.0);
+                              if (t < 0f) {
+                                  t += 1f;
+                              }
+                              float b = t < 0.5f ? (float) Math.sin(2.0 * Math.PI * t) : 0f;
+                              y = cy - b * half * 0.35f;
+                              r = dr * (1f + 0.3f * b);
+                              a = 140f + 115f * b;
+                          } else {
+                              float kf = Math.max(0f, Math.min(1f, shown * 3f - i));
+                              r = dr * (0.8f + 0.2f * kf);
+                              a = 70f + 185f * kf;
+                          }
+                          paint.setColor(alphaOf(col, a));
+                          c.drawCircle(cx + (i - 1) * gap, y, r, paint);
+                      }
+                  }
+
+                  private void drawOrbit(Canvas c, float cx, float cy, float half, int col) {
+                      float orbit = half * 0.72f;
                       paint.setStyle(Paint.Style.STROKE);
                       paint.setStrokeWidth(Math.max(1f, half * 0.06f));
                       paint.setColor(alphaOf(col, 40));
                       c.drawCircle(cx, cy, orbit, paint);
+                      double a = Math.toRadians((clock * 0.28) % 360.0);
+                      paint.setStyle(Paint.Style.FILL);
+                      paint.setColor(col);
+                      c.drawCircle(cx + orbit * (float) Math.cos(a), cy + orbit * (float) Math.sin(a), half * 0.17f, paint);
+                      paint.setColor(alphaOf(col, 150));
+                      c.drawCircle(cx - orbit * (float) Math.cos(a), cy - orbit * (float) Math.sin(a), half * 0.12f, paint);
+                      float cs = indeterminate ? 1f + 0.15f * (float) Math.sin(clock / 220.0) : 0.5f + 0.5f * shown;
+                      paint.setColor(col);
+                      c.drawCircle(cx, cy, half * 0.14f * cs, paint);
                   }
-                  paint.setStyle(Paint.Style.FILL);
-                  double step = Math.toRadians(9.0);
-                  for (int i = 0; i < TAIL; i++) {
-                      float f = i / (float) TAIL;
-                      double a = head - i * step;
-                      float al = 255f * (float) Math.pow(1f - f, 1.6);
-                      paint.setColor(alphaOf(col, al));
-                      c.drawCircle(cx + orbit * (float) Math.cos(a), cy + orbit * (float) Math.sin(a), half * 0.2f * (1f - 0.75f * f), paint);
+
+                  private void drawComet(Canvas c, float cx, float cy, float half, int col) {
+                      float orbit = half * 0.72f;
+                      double head;
+                      if (indeterminate) {
+                          head = Math.toRadians(-90.0 + (clock * 0.33) % 360.0);
+                      } else {
+                          head = Math.toRadians(-90.0 + 360.0 * shown);
+                          paint.setStyle(Paint.Style.STROKE);
+                          paint.setStrokeWidth(Math.max(1f, half * 0.06f));
+                          paint.setColor(alphaOf(col, 40));
+                          c.drawCircle(cx, cy, orbit, paint);
+                      }
+                      paint.setStyle(Paint.Style.FILL);
+                      double step = Math.toRadians(9.0);
+                      for (int i = 0; i < TAIL; i++) {
+                          float f = i / (float) TAIL;
+                          double a = head - i * step;
+                          float al = 255f * (float) Math.pow(1f - f, 1.6);
+                          paint.setColor(alphaOf(col, al));
+                          c.drawCircle(cx + orbit * (float) Math.cos(a), cy + orbit * (float) Math.sin(a), half * 0.2f * (1f - 0.75f * f), paint);
+                      }
                   }
               }
           }'''
@@ -9286,6 +9351,17 @@ jobs:
           SECTION_JAVA = r'''
               private void addLoaderSection(LinearLayout list, final Context context) {
                   addHeader(list, context, "Индикатор загрузки");
+                  final TextCheckCell replaceCell = new TextCheckCell(context);
+                  replaceCell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  replaceCell.setTextAndCheck("Заменить индикаторы Telegram", FluxStyle.bool(FluxStyle.K_LOADER_REPLACE, true), true);
+                  replaceCell.setOnClickListener(v -> {
+                      boolean value = !FluxStyle.bool(FluxStyle.K_LOADER_REPLACE, true);
+                      FluxStyle.setBool(FluxStyle.K_LOADER_REPLACE, value);
+                      replaceCell.setChecked(value);
+                      org.telegram.messenger.FluxLoadingIndicator.reloadSettings();
+                      FluxStyle.pop(replaceCell);
+                  });
+                  list.addView(replaceCell, matchWrap());
                   LinearLayout row = new LinearLayout(context);
                   row.setOrientation(LinearLayout.HORIZONTAL);
                   row.setGravity(android.view.Gravity.CENTER);
@@ -9323,7 +9399,7 @@ jobs:
                   });
                   list.addView(styleCell, matchWrap());
                   addSlider(list, context, "Скорость анимации", FluxStyle.K_LOADER_SPEED, 50, 200, 100, false, " %", refresh);
-                  addNote(list, context, "Индикатор рисуется на Canvas, ~30 кадров/с, и останавливается, когда не виден на экране.");
+                  addNote(list, context, "Если включено, выбранный стиль заменяет круговые индикаторы загрузки Telegram (список чатов, открытие чата, вход, диалоги).");
                   refresh.run();
               }
 
@@ -9347,9 +9423,10 @@ jobs:
               else:
                   keys = ('public static final String K_LOADER_STYLE = "loader_style";\n'
                           '    public static final String K_LOADER_SPEED = "loader_speed";\n'
+                          '    public static final String K_LOADER_REPLACE = "loader_replace";\n'
                           '    ')
                   wr(sp, s.replace(anchor, keys + anchor, 1))
-                  ok("FluxStyle: K_LOADER_STYLE, K_LOADER_SPEED")
+                  ok("FluxStyle: K_LOADER_STYLE, K_LOADER_SPEED, K_LOADER_REPLACE")
 
           # --- секция в FluxStyleActivity
           ap = find("FluxStyleActivity.java")
@@ -9372,8 +9449,396 @@ jobs:
                       wr(ap, a)
                       ok("FluxStyleActivity: секция «Индикатор загрузки» (стиль, скорость, превью 16/28/48 dp)")
 
+          # --- хук в RadialProgressView: подмена отрисовки круговых индикаторов Telegram
+          rp = find("RadialProgressView.java")
+          if not rp:
+              warn("RadialProgressView.java не найден - индикаторы Telegram не заменятся (останется только экран настроек)")
+          else:
+              r = rd(rp)
+              if "FluxLoadingIndicator.drawRadial" in r:
+                  ok("RadialProgressView: уже пропатчен")
+              else:
+                  pat = re.compile(r'(?m)^([ \t]*)(\w+)\.drawArc\(\s*cicleRect\s*,\s*radOffset\s*,\s*drawingCircleLenght\s*=\s*currentCircleLength\s*,\s*false\s*,\s*progressPaint\s*\);')
+                  def hook(m):
+                      i, cv = m.group(1), m.group(2)
+                      return (i + "drawingCircleLenght = currentCircleLength;\n"
+                              + i + "if (!org.telegram.messenger.FluxLoadingIndicator.drawRadial(" + cv + ", cicleRect, noProgress, animatedProgress, progressPaint.getColor(), toCircleProgress)) {\n"
+                              + i + "    " + cv + ".drawArc(cicleRect, radOffset, currentCircleLength, false, progressPaint);\n"
+                              + i + "}")
+                  r2, n = pat.subn(hook, r)
+                  if n == 0:
+                      warn("RadialProgressView: drawArc не найден - индикаторы Telegram не заменятся")
+                  else:
+                      wr(rp, r2)
+                      ok("RadialProgressView: подмена отрисовки на FluxLoadingIndicator (мест: %d)" % n)
+
           with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
               f.write("## FluxGram: loading indicator\n```\n" + "\n".join(report) + "\n```\n")
+          PY
+
+      - name: "FluxGram - 5 функций (view-once, anti-save, premium, speed, profile details)"
+        run: |
+          python3 - <<'PY'
+          import os, re, glob, sys
+
+          report = []
+          critical = []
+          def ok(m):   print(m); report.append("OK   " + m)
+          def warn(m): print("::warning::" + m); report.append("WARN " + m)
+          def fail(m): print("::error::" + m); report.append("FAIL " + m); critical.append(m)
+
+          SRC = "TMessagesProj/src/main/java"
+          MSG = SRC + "/org/telegram/messenger"
+          def find(name):
+              r = glob.glob(SRC + "/**/" + name, recursive=True)
+              return r[0] if r else None
+          def rd(p): return open(p, encoding="utf-8").read()
+          def wr(p, s): open(p, "w", encoding="utf-8").write(s)
+
+          def apply(name, pat, repl, label, marker, sig):
+              """Один якорь: найден ровно 1 раз - правим, иначе warning и файл не трогаем."""
+              p = find(name)
+              if not p:
+                  warn("%s: файл не найден (%s). Ожидается файл с %s" % (name, label, sig))
+                  return False
+              s = rd(p)
+              if marker in s:
+                  ok("%s: уже применено (%s)" % (name, label))
+                  return True
+              ms = list(re.finditer(pat, s))
+              if len(ms) != 1:
+                  warn("%s: якорь найден %d раз, нужно 1 - файл не тронут (%s). Ожидается: %s" % (name, len(ms), label, sig))
+                  return False
+              m = ms[0]
+              wr(p, s[:m.start()] + repl(m) + s[m.end():])
+              ok("%s: %s" % (name, label))
+              return True
+
+          # ---------------------------------------------------------------- Java
+
+          VO_JAVA = r'''package org.telegram.messenger;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+
+          import org.telegram.tgnet.TLRPC;
+
+          import java.io.File;
+          import java.util.HashSet;
+          import java.util.Set;
+
+          /** FluxGram: view-once медиа остаются в кэше после закрытия просмотрщика. */
+          public final class FluxViewOnce {
+
+              private static final String PREF = "fluxgram_viewonce";
+              private static final String KEY_FILES = "flux_view_once_files";
+              private static Set<String> protectedNames;
+
+              private static SharedPreferences prefs() {
+                  return ApplicationLoader.applicationContext.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+              }
+
+              public static boolean keepEnabled() {
+                  return FluxStyle.bool(FluxStyle.K_KEEP_VIEW_ONCE, true);
+              }
+
+              public static void setKeepEnabled(boolean value) {
+                  FluxStyle.setBool(FluxStyle.K_KEEP_VIEW_ONCE, value);
+              }
+
+              /** Медиа одного просмотра (не секретный чат: там своё самоуничтожение). */
+              public static boolean isViewOnce(MessageObject m) {
+                  if (m == null || m.messageOwner == null || m.messageOwner instanceof TLRPC.TL_message_secret) {
+                      return false;
+                  }
+                  TLRPC.MessageMedia media = MessageObject.getMedia(m.messageOwner);
+                  return media != null && media.ttl_seconds != 0;
+              }
+
+              public static boolean shouldKeep(MessageObject m) {
+                  return keepEnabled() && isViewOnce(m);
+              }
+
+              private static synchronized Set<String> names() {
+                  if (protectedNames == null) {
+                      protectedNames = new HashSet<>(prefs().getStringSet(KEY_FILES, new HashSet<String>()));
+                  }
+                  return protectedNames;
+              }
+
+              public static synchronized void protect(File f) {
+                  if (f == null) {
+                      return;
+                  }
+                  if (names().add(f.getName())) {
+                      prefs().edit().putStringSet(KEY_FILES, new HashSet<>(names())).apply();
+                  }
+              }
+
+              public static synchronized boolean isProtected(File f) {
+                  return f != null && keepEnabled() && names().contains(f.getName());
+              }
+          }
+          '''
+
+          EXTRAS_JAVA = r'''package org.telegram.messenger;
+
+          import org.telegram.tgnet.TLRPC;
+
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+
+          /** FluxGram: ID, DC и примерная дата регистрации в профиле. */
+          public final class FluxExtras {
+
+              // ID -> unix time регистрации, по ним линейно интерполируем
+              private static final long[][] ANCHORS = {
+                  {2768409L, 1383264000L}, {7679610L, 1388448000L}, {11538514L, 1391212000L},
+                  {15835244L, 1392940000L}, {23646077L, 1393459000L}, {44634663L, 1399334000L},
+                  {46145305L, 1400198000L}, {54845238L, 1411257000L}, {63263518L, 1414454000L},
+                  {101260938L, 1425600000L}, {111220210L, 1429574000L}, {116812045L, 1437696000L},
+                  {125828524L, 1444003000L}, {157242073L, 1446768000L}, {171295414L, 1457481000L},
+                  {222021233L, 1465344000L}, {278941742L, 1473465000L}, {297621225L, 1481846000L},
+                  {337808429L, 1487707000L}, {400169472L, 1501459000L}, {805158066L, 1563208000L},
+                  {1974255900L, 1634000000L}
+              };
+
+              public static String registrationEstimate(long id) {
+                  if (id <= 0) {
+                      return "неизвестно";
+                  }
+                  long last = ANCHORS[ANCHORS.length - 1][0];
+                  if (id > last) {
+                      return "позже 2021";
+                  }
+                  long ts = ANCHORS[0][1];
+                  if (id >= ANCHORS[0][0]) {
+                      for (int i = 1; i < ANCHORS.length; i++) {
+                          if (id <= ANCHORS[i][0]) {
+                              long x0 = ANCHORS[i - 1][0], x1 = ANCHORS[i][0];
+                              long y0 = ANCHORS[i - 1][1], y1 = ANCHORS[i][1];
+                              ts = y0 + (y1 - y0) * (id - x0) / (x1 - x0);
+                              break;
+                          }
+                      }
+                  }
+                  return "≈ " + new SimpleDateFormat("LLLL yyyy", Locale.getDefault()).format(new Date(ts * 1000L));
+              }
+
+              public static String profileInfo(long userId) {
+                  String dc = "?";
+                  try {
+                      TLRPC.User u = MessagesController.getInstance(UserConfig.selectedAccount).getUser(userId);
+                      if (u != null && u.photo != null && u.photo.dc_id != 0) {
+                          dc = String.valueOf(u.photo.dc_id);
+                      }
+                  } catch (Throwable e) {
+                      FileLog.e(e);
+                  }
+                  return "ID " + userId + "  ·  DC " + dc + "  ·  " + registrationEstimate(userId);
+              }
+          }
+          '''
+
+          SECTION_JAVA = r'''
+              private void addFeaturesSection(LinearLayout list, Context context) {
+                  addHeader(list, context, "Дополнительные функции");
+                  addSwitch(list, context, "Сохранять медиа одного просмотра", FluxStyle.K_KEEP_VIEW_ONCE, true, true);
+                  addSwitch(list, context, "Сохранение из чатов с запретом копирования", FluxStyle.K_BYPASS_RESTRICT, true, true);
+                  addSwitch(list, context, "Локальный Premium (только интерфейс)", FluxStyle.K_LOCAL_PREMIUM, true, true);
+                  addSwitch(list, context, "Ускорение загрузки файлов", FluxStyle.K_SPEED_BOOST, true, true);
+                  addSwitch(list, context, "ID, DC и дата регистрации в профиле", FluxStyle.K_PROFILE_DETAILS, true, false);
+                  addNote(list, context, "Часть изменений применяется после повторного открытия чата или перезапуска приложения. Локальный Premium меняет только вид интерфейса: сервер Premium-функции не включает.");
+              }
+
+          '''
+
+          # ---------------------------------------------------------------- 1. ключи в FluxStyle (критично)
+
+          KEYS = [
+              ("K_KEEP_VIEW_ONCE", "keep_view_once"),
+              ("K_BYPASS_RESTRICT", "bypass_restrict"),
+              ("K_LOCAL_PREMIUM", "local_premium"),
+              ("K_SPEED_BOOST", "speed_boost"),
+              ("K_PROFILE_DETAILS", "profile_details"),
+          ]
+          sp = find("FluxStyle.java")
+          if not sp:
+              fail("FluxStyle.java не найден - ключи K_* не вставлены")
+          else:
+              s = rd(sp)
+              anchor = "public static final int GHOST_ITEM_ID = 91370;"
+              if s.count(anchor) != 1:
+                  fail("FluxStyle.java: якорь GHOST_ITEM_ID найден %d раз, нужно 1" % s.count(anchor))
+              else:
+                  add = "".join('public static final String %s = "%s";\n    ' % (k, v) for k, v in KEYS if k + " =" not in s)
+                  if add:
+                      wr(sp, s.replace(anchor, add + anchor, 1))
+                      ok("FluxStyle: ключи " + ", ".join(k for k, v in KEYS if k + " =" not in s))
+                  else:
+                      ok("FluxStyle: ключи уже есть")
+
+          # ---------------------------------------------------------------- 2. FluxViewOnce + FluxExtras (критично)
+
+          vo_path = MSG + "/FluxViewOnce.java"
+          try:
+              if os.path.exists(vo_path):
+                  v = rd(vo_path)
+                  if "K_KEEP_VIEW_ONCE" in v:
+                      ok("FluxViewOnce.java: уже на K_KEEP_VIEW_ONCE")
+                  else:
+                      a1 = "return prefs().getBoolean(KEY_KEEP, true);"
+                      a2 = "prefs().edit().putBoolean(KEY_KEEP, value).apply();"
+                      if v.count(a1) == 1 and v.count(a2) == 1:
+                          v = v.replace(a1, "return FluxStyle.bool(FluxStyle.K_KEEP_VIEW_ONCE, true);")
+                          v = v.replace(a2, "FluxStyle.setBool(FluxStyle.K_KEEP_VIEW_ONCE, value);")
+                          wr(vo_path, v)
+                          ok("FluxViewOnce.java: настройка переведена на FluxStyle.K_KEEP_VIEW_ONCE")
+                      else:
+                          warn("FluxViewOnce.java существует, но keepEnabled()/setKeepEnabled() выглядят иначе - настройка K_KEEP_VIEW_ONCE не подключена. "
+                               "Ожидается: %s и %s" % (a1, a2))
+              else:
+                  wr(vo_path, VO_JAVA)
+                  ok("FluxViewOnce.java создан")
+          except Exception as e:
+              fail("FluxViewOnce.java: " + str(e))
+
+          ex_path = MSG + "/FluxExtras.java"
+          try:
+              if os.path.exists(ex_path):
+                  if "profileInfo" in rd(ex_path):
+                      ok("FluxExtras.java: уже есть, profileInfo на месте")
+                  else:
+                      warn("FluxExtras.java существует без profileInfo(long) - строку профиля нужно добавить вручную")
+              else:
+                  wr(ex_path, EXTRAS_JAVA)
+                  ok("FluxExtras.java создан")
+          except Exception as e:
+              fail("FluxExtras.java: " + str(e))
+
+          # ---------------------------------------------------------------- 3. view-once: хуки (идемпотентно, якоря те же, что в шаге view-once)
+
+          apply("SecretMediaViewer.java",
+                r'(?m)^([ \t]*)ignoreDelete = messageObject\.messageOwner\.ttl == 0x7FFFFFFF;',
+                lambda m: (m.group(1) + "ignoreDelete = messageObject.messageOwner.ttl == 0x7FFFFFFF || org.telegram.messenger.FluxViewOnce.shouldKeep(messageObject);\n"
+                           + m.group(1) + "if (org.telegram.messenger.FluxViewOnce.shouldKeep(messageObject)) {\n"
+                           + m.group(1) + "    org.telegram.messenger.FluxViewOnce.protect(FileLoader.getInstance(currentAccount).getPathToMessage(messageObject.messageOwner));\n"
+                           + m.group(1) + "}"),
+                "ignoreDelete и защита файла", "FluxViewOnce.shouldKeep(messageObject)",
+                "ignoreDelete = messageObject.messageOwner.ttl == 0x7FFFFFFF;")
+
+          apply("SecretMediaViewer.java",
+                r'(?m)^([ \t]*)currentMessageObject\.messageOwner\.destroyTime = key;',
+                lambda m: (m.group(1) + "if (!org.telegram.messenger.FluxViewOnce.shouldKeep(currentMessageObject)) {\n"
+                           + m.group(1) + "    currentMessageObject.messageOwner.destroyTime = key;\n"
+                           + m.group(1) + "}"),
+                "destroyTime не выставляется для view-once", "FluxViewOnce.shouldKeep(currentMessageObject)",
+                "currentMessageObject.messageOwner.destroyTime = key;")
+
+          apply("FileLoader.java",
+                r'(?m)^([ \t]*)File file = files\.get\(a\);\n[ \t]*File encrypted = new File\(file\.getAbsolutePath\(\) \+ "\.enc"\);',
+                lambda m: (m.group(1) + "File file = files.get(a);\n"
+                           + m.group(1) + "if (FluxViewOnce.isProtected(file)) {\n"
+                           + m.group(1) + "    continue;\n"
+                           + m.group(1) + "}\n"
+                           + m.group(1) + 'File encrypted = new File(file.getAbsolutePath() + ".enc");'),
+                "deleteFiles пропускает защищённые файлы", "FluxViewOnce.isProtected(file)",
+                'File file = files.get(a); File encrypted = new File(file.getAbsolutePath() + ".enc"); в deleteFiles')
+
+          # ---------------------------------------------------------------- 4. сохранение из чатов с запретом копирования
+
+          apply("MessagesController.java",
+                r'(?m)^([ \t]*)public boolean isChatNoForwards\(TLRPC\.Chat (\w+)\) \{\n',
+                lambda m: (m.group(0)
+                           + m.group(1) + "    if (FluxStyle.bool(FluxStyle.K_BYPASS_RESTRICT, true)) {\n"
+                           + m.group(1) + "        return false;\n"
+                           + m.group(1) + "    }\n"),
+                "isChatNoForwards(Chat) возвращает false", "K_BYPASS_RESTRICT",
+                "public boolean isChatNoForwards(TLRPC.Chat chat) {")
+
+          # запрет приходит ещё и флагом на самом сообщении: гасим его при разборе TL_message
+          apply("TLRPC.java",
+                r'(?m)^([ \t]*)noforwards = hasFlag\(flags, FLAG_26\);',
+                lambda m: (m.group(1) + "noforwards = hasFlag(flags, FLAG_26) && !org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_BYPASS_RESTRICT, true);"),
+                "TL_message.noforwards гасится при разборе", "K_BYPASS_RESTRICT",
+                "noforwards = hasFlag(flags, FLAG_26); в TL_message.readParams")
+
+          warn("enableSavingMedia не найден в исходниках: такого поля или метода в этом форке нет, патч не нужен. Ожидалась сигнатура вида boolean enableSavingMedia()")
+          warn("isRestrictedMessage / checkCanOpenChat не трогаю: isRestrictedMessage - поле MessageObject про региональные и юридические ограничения контента (restriction_reason), "
+               "а не про запрет копирования; метода checkCanOpenChat в форке нет")
+          warn("isUserNoForwards (запрет пересылки в личных чатах) не меняю: его включает сам собеседник, это отдельная настройка приватности")
+
+          # ---------------------------------------------------------------- 5. локальный Premium
+
+          apply("UserConfig.java",
+                r'(public boolean isPremium\(\) \{\n[ \t]*TLRPC\.User user = currentUser;\n[ \t]*if \(user == null\) \{\n[ \t]*return false;\n[ \t]*\}\n)([ \t]*)return user\.premium;',
+                lambda m: (m.group(1)
+                           + m.group(2) + "if (FluxStyle.bool(FluxStyle.K_LOCAL_PREMIUM, true)) {\n"
+                           + m.group(2) + "    return true;\n"
+                           + m.group(2) + "}\n"
+                           + m.group(2) + "return user.premium;"),
+                "isPremium() true для залогиненного аккаунта", "K_LOCAL_PREMIUM",
+                "public boolean isPremium() { TLRPC.User user = currentUser; if (user == null) { return false; } return user.premium; }")
+
+          warn("PremiumPreviewFragment.forcePremium не найден: такого поля нет в форке. Ожидалось: public static boolean forcePremium")
+          warn("isPremiumFeatureAvailable: единственный метод с таким именем - private static в ProfileActivity (поиск настроек), он уже даёт true при isPremium()==true")
+          warn("StoriesController.isPremium(long uid) не трогаю: он проверяет Premium у другого пользователя, а не у вас")
+          warn("premiumLocked не трогаю: MessagesController.premiumFeaturesBlocked() = premiumLocked && !isPremium() уже false при локальном Premium; premiumPurchaseBlocked() оставлен как есть")
+
+          # ---------------------------------------------------------------- 6. ускорение загрузки
+
+          apply("FileLoadOperation.java",
+                r'(?m)^([ \t]*)if \(isStory\) \{\n[ \t]*// On slow connections the first part of a visible story arrives sooner when parts are small\.',
+                lambda m: (m.group(1) + "if (FluxStyle.bool(FluxStyle.K_SPEED_BOOST, true) && !forceSmallChunk) {\n"
+                           + m.group(1) + "    downloadChunkSizeBig = 1024 * 1024;\n"
+                           + m.group(1) + "    maxDownloadRequests = 12;\n"
+                           + m.group(1) + "    maxDownloadRequestsBig = 12;\n"
+                           + m.group(1) + "}\n"
+                           + m.group(0)),
+                "updateParams: чанк 1 МБ, 12 параллельных запросов", "K_SPEED_BOOST",
+                "private void updateParams() { ... if (isStory) { // On slow connections ... }")
+
+          warn("FileUploadOperation: лимита 0x800 в startUploadRequest() нет. Параллелизм здесь задаёт maxUploadingKBytes = 1024 * 8 "
+               "(maxRequestsCount = maxUploadingKBytes / uploadChunkSize, у больших файлов это уже ~16 запросов), менять вслепую не стал")
+
+          # ---------------------------------------------------------------- 7. детали профиля: подключаем настройку к уже вставленной строке
+
+          apply("ProfileActivity.java",
+                r'(?m)^([ \t]*)fluxInfoRow = userId != 0 \? rowCount\+\+ : -1;',
+                lambda m: (m.group(1) + "fluxInfoRow = userId != 0 && org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_PROFILE_DETAILS, true) ? rowCount++ : -1;"),
+                "строка профиля зависит от K_PROFILE_DETAILS", "K_PROFILE_DETAILS",
+                "fluxInfoRow = userId != 0 ? rowCount++ : -1; (его вставляет шаг «детали профиля»)")
+
+          # ---------------------------------------------------------------- 8. переключатели в «Визуал и стиль»
+
+          ap = find("FluxStyleActivity.java")
+          if not ap:
+              warn("FluxStyleActivity.java не найден - переключатели функций не добавлены (настройки останутся по умолчанию)")
+          else:
+              a = rd(ap)
+              if "addFeaturesSection" in a:
+                  ok("FluxStyleActivity: секция функций уже добавлена")
+              else:
+                  mm = re.search(r'(?m)^([ \t]*)private LinearLayout\.LayoutParams matchWrap\(\)\s*\{', a)
+                  cm = re.search(r'(?m)^([ \t]*)updateCells\(\);\n[ \t]*FluxStyle\.springIn\(root\);', a)
+                  if not mm or not cm:
+                      warn("FluxStyleActivity: не найдены точки вставки (matchWrap=%s, updateCells+springIn=%s) - переключатели не добавлены" % (bool(mm), bool(cm)))
+                  else:
+                      call = cm.group(1) + "addFeaturesSection(list, context);\n"
+                      a = a[:mm.start()] + SECTION_JAVA.lstrip("\n") + a[mm.start():]
+                      cm = re.search(r'(?m)^([ \t]*)updateCells\(\);\n[ \t]*FluxStyle\.springIn\(root\);', a)
+                      a = a[:cm.start()] + call + a[cm.start():]
+                      wr(ap, a)
+                      ok("FluxStyleActivity: секция «Дополнительные функции» (5 переключателей)")
+
+          # ---------------------------------------------------------------- отчёт
+
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
+              f.write("## FluxGram: 5 функций\n```\n" + "\n".join(report) + "\n```\n")
+          if critical:
+              print("::error::Критичные патчи не применились: " + "; ".join(critical))
+              sys.exit(1)
           PY
 
       - name: Build APK
