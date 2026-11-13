@@ -43,6 +43,14 @@ on:
     description: "FluxGram: частицы вокруг значка по умолчанию (в приложении выключаются в «Темы FluxGram»)"
     type: boolean
     default: true
+   badge_style:
+    description: "FluxGram: стиль значка по умолчанию (в приложении меняется в «Темы FluxGram»)"
+    type: choice
+    default: classic
+    options:
+    - classic
+    - md3_flower
+    - md3_square
    keep_view_once:
     description: "FluxGram: view-once медиа не удаляются после просмотра"
     type: boolean
@@ -95,6 +103,7 @@ env:
  GHOST_OFFLINE: ${{ inputs.ghost_offline }}
  MATERIAL_YOU: ${{ inputs.material_you }}
  BADGE_PARTICLES: ${{ inputs.badge_particles }}
+ BADGE_STYLE: ${{ inputs.badge_style }}
  KEEP_VIEW_ONCE: ${{ inputs.keep_view_once }}
  FOLDER_RENAME: ${{ inputs.folder_rename }}
  HIDE_ADS: ${{ inputs.hide_ads }}
@@ -2803,6 +2812,7 @@ jobs:
     env:
      MATERIAL_YOU: ${{ inputs.material_you }}
      BADGE_PARTICLES: ${{ inputs.badge_particles }}
+     BADGE_STYLE: ${{ inputs.badge_style }}
     run: |
      set -e
      D=TMessagesProj/src/main/java/org/telegram/messenger
@@ -2817,6 +2827,7 @@ jobs:
      import android.graphics.PixelFormat;
      import android.graphics.Rect;
      import android.graphics.drawable.Drawable;
+     import android.os.Build;
      import android.os.SystemClock;
      public class FluxBadgeDrawable extends Drawable {
          private static final int N = 9;
@@ -2832,6 +2843,46 @@ jobs:
          private final Path check = new Path();
          private final int size;
          private int alpha = 255;
+         private int forcedStyle = -1;
+         private static volatile int styleState = -1;
+         private final int[] md3 = new int[2];
+         private final Path shape = new Path();
+         private final Path bolt = new Path();
+         public static int style(Context ctx) {
+             int st = styleState;
+             if (st < 0) {
+                 st = ctx.getSharedPreferences("fluxgram_prefs", Context.MODE_PRIVATE).getInt("flux_badge_style", FLUX_STYLE_DEFAULT);
+                 if (st < 0 || st > 2) {
+                     st = 0;
+                 }
+                 styleState = st;
+             }
+             return st;
+         }
+         public static void setStyle(Context ctx, int st) {
+             if (st < 0 || st > 2) {
+                 st = 0;
+             }
+             styleState = st;
+             ctx.getSharedPreferences("fluxgram_prefs", Context.MODE_PRIVATE).edit().putInt("flux_badge_style", st).apply();
+         }
+         public FluxBadgeDrawable forceStyle(int st) {
+             forcedStyle = st;
+             return this;
+         }
+         private void initMd3Colors(Context ctx, boolean off) {
+             int bg = off ? 0xFFFFB68F : 0xFFD0BCFF;
+             int fg = off ? 0xFF4A2800 : 0xFF381E72;
+             try {
+                 if (Build.VERSION.SDK_INT >= 31) {
+                     bg = ctx.getResources().getColor(off ? android.R.color.system_accent3_200 : android.R.color.system_accent1_200, null);
+                     fg = ctx.getResources().getColor(off ? android.R.color.system_accent3_900 : android.R.color.system_accent1_900, null);
+                 }
+             } catch (Throwable ignore) {
+             }
+             md3[0] = bg;
+             md3[1] = fg;
+         }
          public static boolean particlesEnabled(Context ctx) {
              int st = particlesState;
              if (st < 0) {
@@ -2853,6 +2904,7 @@ jobs:
              this.animated = animated;
              this.official = official;
              this.size = AndroidUtilities.dp(22);
+             initMd3Colors(ctx, official);
              setBounds(0, 0, size, size);
          }
          @Override
@@ -2863,8 +2915,13 @@ jobs:
              float cy = b.exactCenterY();
              float s = Math.min(b.width(), b.height());
              int half = (int) (s * 0.32f);
-             icon.setBounds((int) cx - half, (int) cy - half, (int) cx + half, (int) cy + half);
-             icon.draw(canvas);
+             int st = forcedStyle >= 0 ? forcedStyle : style(appCtx);
+             if (st == 0) {
+                 icon.setBounds((int) cx - half, (int) cy - half, (int) cx + half, (int) cy + half);
+                 icon.draw(canvas);
+             } else {
+                 drawMd3(canvas, cx, cy, half * 1.12f, st);
+             }
              if (particles) {
                  drawParticles(canvas, cx, cy, s);
              }
@@ -2874,6 +2931,48 @@ jobs:
              if (animated && particles) {
                  invalidateSelf();
              }
+         }
+         private void drawMd3(Canvas c, float cx, float cy, float r, int st) {
+             shape.reset();
+             if (st == 1) {
+                 int pts = 96;
+                 float amp = 0.085f;
+                 for (int i = 0; i <= pts; i++) {
+                     double a = 2 * Math.PI * i / pts;
+                     float rr = r * (1f - amp + amp * (float) Math.cos(8 * a));
+                     float x = cx + rr * (float) Math.cos(a);
+                     float y = cy + rr * (float) Math.sin(a);
+                     if (i == 0) {
+                         shape.moveTo(x, y);
+                     } else {
+                         shape.lineTo(x, y);
+                     }
+                 }
+                 shape.close();
+             } else {
+                 float q = r * 0.92f;
+                 shape.addRoundRect(cx - q, cy - q, cx + q, cy + q, q * 0.5f, q * 0.5f, Path.Direction.CW);
+             }
+             paint.setStyle(Paint.Style.FILL);
+             paint.setColor(md3[0]);
+             paint.setAlpha(alpha);
+             c.drawPath(shape, paint);
+             float k = r * 0.5f;
+             float[] p = {0.18f, -1f, -0.62f, 0.12f, -0.08f, 0.12f, -0.22f, 1f, 0.62f, -0.16f, 0.08f, -0.16f};
+             bolt.reset();
+             for (int i = 0; i < p.length; i += 2) {
+                 float x = cx + p[i] * k;
+                 float y = cy + p[i + 1] * k;
+                 if (i == 0) {
+                     bolt.moveTo(x, y);
+                 } else {
+                     bolt.lineTo(x, y);
+                 }
+             }
+             bolt.close();
+             paint.setColor(md3[1]);
+             paint.setAlpha(alpha);
+             c.drawPath(bolt, paint);
          }
          private void drawParticles(Canvas canvas, float cx, float cy, float s) {
              int[] colors = official ? COLORS_OFFICIAL : COLORS;
@@ -2954,7 +3053,7 @@ jobs:
      import java.util.Map;
      import java.util.Set;
      public final class FluxBadge implements NotificationCenter.NotificationCenterDelegate {
-         public static final String MARK = "⁠​⁠";
+         public static final String MARK = "\u2060\u200b\u2060";
          public static final String OFFICIAL_CHANNEL = "FluxGraam";
          private static final String PREFS = "fluxgram_prefs";
          private static final String KNOWN = "flux_known_users";
@@ -3000,6 +3099,9 @@ jobs:
              if (isSelf(userId)) {
                  return true;
              }
+             if (isMarked(MessagesController.getInstance(UserConfig.selectedAccount).getUser(userId))) {
+                 return true;
+             }
              if (isFluxUser(about)) {
                  learn(userId, true);
                  return true;
@@ -3007,6 +3109,15 @@ jobs:
              synchronized (LOCK) {
                  return known.contains(userId);
              }
+         }
+         public static boolean isMarked(TLRPC.User u) {
+             if (u == null) {
+                 return false;
+             }
+             return (u.first_name != null && u.first_name.contains(MARK)) || (u.last_name != null && u.last_name.contains(MARK));
+         }
+         public static void refreshNow() {
+             scheduleRefresh();
          }
          public static boolean isSelf(long userId) {
              if (userId == 0) {
@@ -3111,14 +3222,13 @@ jobs:
              if (isSelf(user.id)) {
                  return append(ctx, name, false);
              }
-             boolean flux;
-             synchronized (LOCK) {
-                 flux = known.contains(user.id);
+             boolean flux = isMarked(user);
+             if (!flux) {
+                 synchronized (LOCK) {
+                     flux = known.contains(user.id);
+                 }
              }
              if (!flux) {
-                 if (!user.bot && !user.deleted) {
-                     enqueue(UserConfig.selectedAccount, user.id, true);
-                 }
                  return name;
              }
              return append(ctx, name, false);
@@ -3152,7 +3262,11 @@ jobs:
                  return tr == null || t - tr > RETRY_MS;
              }
          }
+         private static final boolean LEGACY_BIO_SCAN = false;
          private static void enqueue(int account, long uid, boolean front) {
+             if (!LEGACY_BIO_SCAN) {
+                 return;
+             }
              if (uid <= 0 || isSelf(uid)) {
                  return;
              }
@@ -3401,6 +3515,7 @@ jobs:
              if (!uc.isClientActivated()) {
                  return;
              }
+             apply(account, null);
              TLRPC.UserFull f = MessagesController.getInstance(account).getUserFull(uc.getClientUserId());
              if (f == null) {
                  MessagesController.getInstance(account).loadFullUser(uc.getCurrentUser(), 0, true);
@@ -3412,22 +3527,33 @@ jobs:
              if (!enabled()) {
                  return;
              }
-             String base = about == null ? "" : about;
-             if (isFluxUser(base)) {
-                 return;
-             }
              UserConfig uc = UserConfig.getInstance(account);
-             final long uid = uc.getClientUserId();
-             String key = "flux_mark_try_" + uid;
+             if (!uc.isClientActivated()) {
+                 return;
+             }
+             TLRPC.User me = uc.getCurrentUser();
+             long uid = uc.getClientUserId();
              long t = now();
-             if (t - prefs().getLong(key, 0L) < MARK_RETRY_MS) {
+             String first = null;
+             String key = "flux_name_try_" + uid;
+             if (me != null && me.first_name != null && !isMarked(me)
+                     && me.first_name.length() + MARK.length() <= 64
+                     && t - prefs().getLong(key, 0L) >= MARK_RETRY_MS) {
+                 first = me.first_name + MARK;
+                 prefs().edit().putLong(key, t).apply();
+             }
+             String cleanAbout = null;
+             String key2 = "flux_clean_try_" + uid;
+             if (about != null && isFluxUser(about) && t - prefs().getLong(key2, 0L) >= MARK_RETRY_MS) {
+                 cleanAbout = about.replace(MARK, "");
+                 prefs().edit().putLong(key2, t).apply();
+             }
+             if (first == null && cleanAbout == null) {
                  return;
              }
-             int max = uc.isPremium() ? 140 : 70;
-             if (base.length() + MARK.length() > max) {
-                 return;
-             }
-             final String newAbout = base + MARK;
+             sendProfile(account, uid, first, cleanAbout);
+         }
+         private static void sendProfile(final int account, final long uid, final String first, final String about) {
              try {
                  Class<?> cls;
                  try {
@@ -3436,11 +3562,17 @@ jobs:
                      cls = Class.forName("org.telegram.tgnet.TLRPC$TL_account_updateProfile");
                  }
                  TLObject req = (TLObject) cls.getDeclaredConstructor().newInstance();
-                 Field fAbout = cls.getField("about");
-                 fAbout.set(req, newAbout);
+                 int add = 0;
+                 if (first != null) {
+                     cls.getField("first_name").set(req, first);
+                     add |= 1;
+                 }
+                 if (about != null) {
+                     cls.getField("about").set(req, about);
+                     add |= 4;
+                 }
                  Field fFlags = cls.getField("flags");
-                 fFlags.setInt(req, fFlags.getInt(req) | 4);
-                 prefs().edit().putLong(key, t).apply();
+                 fFlags.setInt(req, fFlags.getInt(req) | add);
                  ConnectionsManager.getInstance(account).sendRequest(req, new RequestDelegate() {
                      @Override
                      public void run(final TLObject response, final TLRPC.TL_error error) {
@@ -3456,10 +3588,13 @@ jobs:
                                      if (response instanceof TLRPC.User) {
                                          mc.putUser((TLRPC.User) response, false);
                                      }
-                                     TLRPC.UserFull f = mc.getUserFull(uid);
-                                     if (f != null) {
-                                         f.about = newAbout;
+                                     if (about != null) {
+                                         TLRPC.UserFull f = mc.getUserFull(uid);
+                                         if (f != null) {
+                                             f.about = about;
+                                         }
                                      }
+                                     scheduleRefresh();
                                  } catch (Throwable e) {
                                      FileLog.e(e);
                                  }
@@ -4247,6 +4382,8 @@ jobs:
                  }
              });
              list.addView(badge, matchWrap());
+             addHeader("Стиль значка");
+             list.addView(new BadgeStylePicker(context), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, AndroidUtilities.dp(96)));
              final TextCheckCell parts = newCell();
              parts.setTextAndCheck("Частицы вокруг значка", FluxBadgeDrawable.particlesEnabled(context), false);
              parts.setOnClickListener(new View.OnClickListener() {
@@ -4263,7 +4400,7 @@ jobs:
              list.addView(parts, matchWrap());
              badgePreview = new BadgePreview(context);
              list.addView(badgePreview, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, AndroidUtilities.dp(92)));
-             addNote("Значок видят другие пользователи FluxGram. Он появляется у них не сразу: приложение проверяет профили по одному в секунду. Частицы выключаются сразу, без перезапуска.");
+             addNote("Значок сразу виден другим пользователям FluxGram везде, где показано имя: в списке чатов, шапке чата и профиле. Для этого к вашему имени добавляется невидимая метка, в «О себе» ничего не пишется. Стиль и частицы меняются сразу, без перезапуска.");
              updateUi(true);
          }
          private void choose(int hue, int sat) {
@@ -4363,6 +4500,60 @@ jobs:
                  }
              }
          }
+         private class BadgeStylePicker extends View {
+             private final FluxBadgeDrawable[] items = new FluxBadgeDrawable[3];
+             private final String[] labels = {"Обычный", "MD3 цветок", "MD3 квадрат"};
+             private final Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
+             private final Paint rp = new Paint(Paint.ANTI_ALIAS_FLAG);
+             BadgeStylePicker(Context c) {
+                 super(c);
+                 for (int i = 0; i < 3; i++) {
+                     items[i] = new FluxBadgeDrawable(c, false, false).forceStyle(i);
+                 }
+                 setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                 tp.setTextSize(AndroidUtilities.dp(12));
+                 tp.setTextAlign(Paint.Align.CENTER);
+                 rp.setStyle(Paint.Style.STROKE);
+                 rp.setStrokeWidth(AndroidUtilities.dp(2));
+             }
+             @Override
+             protected void onDraw(Canvas canvas) {
+                 int sel = FluxBadgeDrawable.style(getContext());
+                 float w = getWidth() / 3f;
+                 float cy = getHeight() * 0.42f;
+                 for (int i = 0; i < 3; i++) {
+                     float cx = w * (i + 0.5f);
+                     float scale = 2f;
+                     float side = items[i].getIntrinsicWidth() * scale;
+                     canvas.save();
+                     canvas.translate(cx - side / 2f, cy - side / 2f);
+                     canvas.scale(scale, scale);
+                     items[i].draw(canvas);
+                     canvas.restore();
+                     boolean on = i == sel;
+                     if (on) {
+                         rp.setColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                         canvas.drawCircle(cx, cy, side * 0.62f, rp);
+                     }
+                     tp.setColor(Theme.getColor(on ? Theme.key_windowBackgroundWhiteBlackText : Theme.key_windowBackgroundWhiteGrayText4));
+                     canvas.drawText(labels[i], cx, cy + side / 2f + AndroidUtilities.dp(18), tp);
+                 }
+             }
+             @Override
+             public boolean onTouchEvent(android.view.MotionEvent e) {
+                 if (e.getAction() == android.view.MotionEvent.ACTION_UP) {
+                     int i = (int) (e.getX() / (getWidth() / 3f));
+                     i = Math.max(0, Math.min(2, i));
+                     FluxBadgeDrawable.setStyle(getContext(), i);
+                     invalidate();
+                     if (badgePreview != null) {
+                         badgePreview.invalidate();
+                     }
+                     FluxBadge.refreshNow();
+                 }
+                 return true;
+             }
+         }
          private class BadgePreview extends View {
              private final FluxBadgeDrawable userBadge;
              private final FluxBadgeDrawable officialBadge;
@@ -4443,6 +4634,8 @@ jobs:
      sed -i "s/FLUX_MY_DEFAULT/$MY/" "$D/FluxFeatures.java"
      if [ "$BADGE_PARTICLES" = "false" ]; then PT=false; else PT=true; fi
      sed -i "s/FLUX_PARTICLES_DEFAULT/$PT/" "$D/FluxBadgeDrawable.java"
+     case "$BADGE_STYLE" in md3_flower) ST=1;; md3_square) ST=2;; *) ST=0;; esac
+     sed -i "s/FLUX_STYLE_DEFAULT/$ST/" "$D/FluxBadgeDrawable.java"
      echo "FluxBadge, FluxBadgeDrawable, FluxFeatures созданы (Material You: $MY, частицы: $PT)"
   - name: FluxGram - патчи (профиль, чат, официальный канал, пункт «Темы FluxGram»)
     run: |
@@ -4610,6 +4803,20 @@ jobs:
          s = pat.sub(lambda m: m.group(1) + hook, s, count=1)
          write(p, s)
          ok("ApplicationLoader: автозапуск проверки значков")
+     p = SRC + "ui/Cells/DialogCell.java"
+     s = read(p)
+     if "FluxBadge" in s:
+         ok("DialogCell: уже пропатчен")
+     elif s:
+         pat = re.compile(r'(?m)^([ \t]*)if \(nameString\.length\(\) == 0\) \{\n')
+         if not re.search(r'CharSequence\s+nameString\b', s) or len(pat.findall(s)) != 1:
+             warn("DialogCell.java: якорь имени не найден, значок в списке чатов не подключён (в шапке чата и профиле он будет)")
+         else:
+             s = pat.sub(lambda m: m.group(1) + "if (user != null && !user.bot && !UserObject.isUserSelf(user) && !UserObject.isReplyUser(user)) {\n" +
+                         m.group(1) + "    nameString = FluxBadge.wrapUser(getContext(), nameString, user);\n" +
+                         m.group(1) + "}\n" + m.group(0), s, count=1)
+             write(p, add_import(s))
+             ok("DialogCell: значок FluxGram в списке чатов")
      with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
          f.write("## Патчи FluxGram (значок, официальный канал, темы)\n```\n" + "\n".join(report) + "\n```\n")
      PY
