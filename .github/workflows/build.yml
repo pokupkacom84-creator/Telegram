@@ -75,6 +75,10 @@ on:
     description: "FluxGram: автопрокси MTProto из GitHub (включать сразу и обновлять)"
     type: boolean
     default: true
+   strict_features:
+    description: "Остановить сборку, если хук доп. функций (view-once, запрет копирования, Premium, ускорение, профиль) не применился"
+    type: boolean
+    default: true
    proxy_sources:
     description: "FluxGram: источники прокси (ссылки через пробел или запятую)"
     type: string
@@ -9278,24 +9282,39 @@ jobs:
                       + m.group(1) + "    }\n"),
            "isChatNoForwards(Chat) возвращает false", "K_BYPASS_RESTRICT",
            "public boolean isChatNoForwards(TLRPC.Chat chat) {")
-     apply("TLRPC.java",
-           r'(?m)^([ \t]*)noforwards = hasFlag\(flags, FLAG_26\);',
-           lambda m: (m.group(1) + "noforwards = hasFlag(flags, FLAG_26) && !org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_BYPASS_RESTRICT, true);"),
-           "TL_message.noforwards гасится при разборе", "K_BYPASS_RESTRICT",
-           "noforwards = hasFlag(flags, FLAG_26); в TL_message.readParams")
+     def patch_noforwards():
+         files = glob.glob(SRC + "/org/telegram/tgnet/**/*.java", recursive=True)
+         pat = re.compile(r'(?m)^([ \t]*)noforwards\s*=\s*([^;\n]+);')
+         done = 0
+         for p in files:
+             s = rd(p)
+             if not pat.search(s):
+                 continue
+             def rep(m):
+                 if "K_BYPASS_RESTRICT" in m.group(2):
+                     return m.group(0)
+                 return (m.group(1) + "noforwards = (" + m.group(2) + ") && !org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_BYPASS_RESTRICT, true);")
+             n = pat.sub(rep, s)
+             if n != s:
+                 wr(p, n)
+             done += len(pat.findall(n))
+         if done:
+             ok("noforwards гасится при разборе TL (Message и Chat), мест: %d" % done)
+         else:
+             warn("noforwards = ... не найден в tgnet/*.java - запрет копирования на уровне TL не снят")
+     patch_noforwards()
      warn("enableSavingMedia не найден в исходниках: такого поля или метода в этом форке нет, патч не нужен. Ожидалась сигнатура вида boolean enableSavingMedia()")
      warn("isRestrictedMessage / checkCanOpenChat не трогаю: isRestrictedMessage - поле MessageObject про региональные и юридические ограничения контента (restriction_reason), "
           "а не про запрет копирования; метода checkCanOpenChat в форке нет")
      warn("isUserNoForwards (запрет пересылки в личных чатах) не меняю: его включает сам собеседник, это отдельная настройка приватности")
      apply("UserConfig.java",
-           r'(public boolean isPremium\(\) \{\n[ \t]*TLRPC\.User user = currentUser;\n[ \t]*if \(user == null\) \{\n[ \t]*return false;\n[ \t]*\}\n)([ \t]*)return user\.premium;',
-           lambda m: (m.group(1)
-                      + m.group(2) + "if (FluxStyle.bool(FluxStyle.K_LOCAL_PREMIUM, true)) {\n"
-                      + m.group(2) + "    return true;\n"
-                      + m.group(2) + "}\n"
-                      + m.group(2) + "return user.premium;"),
+           r'(?m)^([ \t]*)public boolean isPremium\(\)\s*\{\n',
+           lambda m: (m.group(0)
+                      + m.group(1) + "    if (FluxStyle.bool(FluxStyle.K_LOCAL_PREMIUM, true) && getCurrentUser() != null) {\n"
+                      + m.group(1) + "        return true;\n"
+                      + m.group(1) + "    }\n"),
            "isPremium() true для залогиненного аккаунта", "K_LOCAL_PREMIUM",
-           "public boolean isPremium() { TLRPC.User user = currentUser; if (user == null) { return false; } return user.premium; }")
+           "public boolean isPremium() {")
      warn("PremiumPreviewFragment.forcePremium не найден: такого поля нет в форке. Ожидалось: public static boolean forcePremium")
      warn("isPremiumFeatureAvailable: единственный метод с таким именем - private static в ProfileActivity (поиск настроек), он уже даёт true при isPremium()==true")
      warn("StoriesController.isPremium(long uid) не трогаю: он проверяет Premium у другого пользователя, а не у вас")
@@ -9342,6 +9361,36 @@ jobs:
          print("::error::Критичные патчи не применились: " + "; ".join(critical))
          sys.exit(1)
      PY
+  - name: Проверка, что хуки функций применились
+    env:
+     STRICT: ${{ inputs.strict_features }}
+    run: |
+     D=TMessagesProj/src/main/java/org/telegram
+     miss=0
+     chk() {
+       if grep -rqF --include="$3" -- "$1" "$D"; then
+         echo "OK   $2"
+         echo "- ✅ $2" >> "$GITHUB_STEP_SUMMARY"
+       else
+         echo "::error::Хук не применён: $2"
+         echo "- ❌ $2" >> "$GITHUB_STEP_SUMMARY"
+         miss=1
+       fi
+     }
+     echo "## Дополнительные функции: хуки" >> "$GITHUB_STEP_SUMMARY"
+     chk "FluxViewOnce.shouldKeep(messageObject)" "view-once: не удалять после просмотра" SecretMediaViewer.java
+     chk "FluxViewOnce.shouldKeep(currentMessageObject)" "view-once: без таймера уничтожения" SecretMediaViewer.java
+     chk "FluxViewOnce.isProtected(" "view-once: файлы защищены от очистки" FileLoader.java
+     chk "K_BYPASS_RESTRICT" "запрет копирования: MessagesController" MessagesController.java
+     chk "K_BYPASS_RESTRICT" "запрет копирования: разбор TL (noforwards)" "*.java"
+     chk "K_LOCAL_PREMIUM" "локальный Premium: UserConfig.isPremium" UserConfig.java
+     chk "K_SPEED_BOOST" "ускорение загрузки: FileLoadOperation" FileLoadOperation.java
+     chk "K_PROFILE_DETAILS" "ID, DC и дата регистрации в профиле" ProfileActivity.java
+     chk "addFeaturesSection" "переключатели в «Визуал и стиль»" FluxStyleActivity.java
+     if [ "$miss" = 1 ] && [ "$STRICT" != "false" ]; then
+       echo "::error::Часть функций не подключилась, сборка остановлена (отключается входом strict_features)"
+       exit 1
+     fi
   - name: Build APK
     run: |
      set -o pipefail
