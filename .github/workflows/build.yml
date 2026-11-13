@@ -7155,7 +7155,6 @@ jobs:
                   prefs().edit().putBoolean(KEY_KEEP, value).apply();
               }
 
-              // view-once / одноразовое медиа обычных чатов; секретные чаты с таймером не трогаем
               public static boolean isViewOnce(MessageObject m) {
                   if (m == null || m.messageOwner == null || m.messageOwner instanceof TLRPC.TL_message_secret) {
                       return false;
@@ -7191,7 +7190,6 @@ jobs:
           if keep_vo:
               wr(MSG + "/FluxViewOnce.java", VO_JAVA); ok("создан FluxViewOnce.java")
 
-              # SecretMediaViewer: не считаем сообщение удаляемым, защищаем файл от очистки
               patch("SecretMediaViewer.java",
                     "        ignoreDelete = messageObject.messageOwner.ttl == 0x7FFFFFFF;\n",
                     "        ignoreDelete = messageObject.messageOwner.ttl == 0x7FFFFFFF || org.telegram.messenger.FluxViewOnce.shouldKeep(messageObject);\n"
@@ -7206,7 +7204,6 @@ jobs:
                     "                        }\n",
                     "не выставлять destroyTime для view-once")
 
-              # FileLoader.deleteFiles: не удалять защищённые файлы
               patch("FileLoader.java",
                     "                File file = files.get(a);\n                File encrypted = new File(file.getAbsolutePath() + \".enc\");\n",
                     "                File file = files.get(a);\n"
@@ -7216,7 +7213,6 @@ jobs:
                     "                File encrypted = new File(file.getAbsolutePath() + \".enc\");\n",
                     "deleteFiles пропускает защищённые view-once файлы")
 
-              # Где ещё живёт удаление по таймеру (в загруженных файлах его нет)
               hits = []
               for path in glob.glob(SRC + "/**/*.java", recursive=True):
                   if not re.search(r'(MessagesStorage|MessagesController)\.java$', path):
@@ -7395,7 +7391,6 @@ jobs:
           wr(SRC + "/org/telegram/messenger/FluxExtras.java", java)
           ok("FluxExtras.java создан (реклама=%s, истории каналов=%s, номер=%s)" % (HIDE_ADS, HIDE_STORIES, HIDE_PHONE))
 
-          # 1. Реклама
           if HIDE_ADS:
               p = find("MessagesController.java")
               if p:
@@ -7411,7 +7406,6 @@ jobs:
               else:
                   warn("MessagesController.java не найден")
 
-          # 2. Истории каналов
           if HIDE_STORIES:
               p = find("StoriesController.java")
               if p:
@@ -7458,7 +7452,6 @@ jobs:
               else:
                   warn("StoriesController.java не найден")
 
-          # 3. Свой номер телефона
           if HIDE_PHONE:
               p = find("PhoneFormat.java")
               if p:
@@ -7476,7 +7469,6 @@ jobs:
               else:
                   warn("PhoneFormat.java не найден")
 
-          # 4. Секунды в времени сообщений
           if SECONDS:
               pl = find("LocaleController.java")
               pc = find("ChatMessageCell.java")
@@ -7521,7 +7513,6 @@ jobs:
               else:
                   warn("LocaleController.java или ChatMessageCell.java не найден")
 
-          # 5. ID / DC / дата регистрации в профиле (всё или ничего)
           if DETAILS:
               p = find("ProfileActivity.java")
               if p:
@@ -7543,7 +7534,6 @@ jobs:
                           warn("Профиль: якоря ProfileActivity не найдены (cls=%s upd=%s adapter=%s viewType=%s bind=%s header=%s) — ID/DC/дата не добавлены" % (
                               bool(cls), bool(upd), ai > 0, bool(g), bool(b), bool(hdr.search(s))))
                       else:
-                          # правки с конца файла к началу, чтобы не сбить позиции
                           edits = []
                           edits.append((b.end(), b.end(),
                               "                    if (position == fluxInfoRow) {\n"
@@ -7565,6 +7555,1251 @@ jobs:
 
           with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
               f.write("## FluxGram: скрытие лишнего, детали профиля, секунды\n```\n" + "\n".join(report) + "\n```\n")
+          PY
+
+      - name: "FluxGram: визуал и стиль (пружина, формы аватарок, призрак, подсветка шпиона)"
+        run: |
+          python3 - <<'PY'
+          import os, re, glob
+
+          report = []
+          def ok(m):   print(m); report.append("OK   " + m)
+          def warn(m): print("::warning::" + m); report.append("WARN " + m)
+
+          SRC = "TMessagesProj/src/main/java"
+          def find(name):
+              r = glob.glob(SRC + "/**/" + name, recursive=True)
+              return r[0] if r else None
+          def rd(p): return open(p, encoding="utf-8").read()
+          def wr(p, s): open(p, "w", encoding="utf-8").write(s)
+
+          STYLE_JAVA = r'''package org.telegram.messenger;
+
+          import android.animation.Animator;
+          import android.animation.AnimatorListenerAdapter;
+          import android.animation.ValueAnimator;
+          import android.app.Activity;
+          import android.content.Context;
+          import android.content.ContextWrapper;
+          import android.content.SharedPreferences;
+          import android.graphics.Bitmap;
+          import android.graphics.BitmapFactory;
+          import android.graphics.Canvas;
+          import android.graphics.Color;
+          import android.graphics.ColorFilter;
+          import android.graphics.Paint;
+          import android.graphics.Path;
+          import android.graphics.PixelFormat;
+          import android.graphics.Rect;
+          import android.graphics.drawable.Drawable;
+          import android.os.SystemClock;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.animation.Interpolator;
+          import android.widget.FrameLayout;
+          import android.widget.Toast;
+
+          import androidx.recyclerview.widget.RecyclerView;
+
+          import org.telegram.tgnet.ConnectionsManager;
+          import org.telegram.tgnet.TLRPC;
+          import org.telegram.ui.ActionBar.ActionBarMenu;
+          import org.telegram.ui.ActionBar.ActionBarMenuItem;
+          import org.telegram.ui.ActionBar.Theme;
+
+          import java.io.File;
+          import java.lang.reflect.Field;
+          import java.lang.reflect.Method;
+          import java.lang.reflect.Modifier;
+          import java.util.HashMap;
+          import java.util.LinkedHashSet;
+          import java.util.WeakHashMap;
+
+          public final class FluxStyle {
+
+              public static final String K_SPRING = "spring";
+              public static final String K_SPRING_UI = "spring_ui";
+              public static final String K_PTAP = "particle_tap";
+              public static final String K_BURST = "send_burst";
+              public static final String K_DYN = "dyn_chat";
+              public static final String K_GICON = "ghost_icon";
+              public static final String K_SHL = "spy_highlight";
+              public static final String K_SPULSE = "spy_pulse";
+              public static final String K_SCOLOR = "spy_color";
+              public static final String K_RADIUS = "bubble_radius";
+              public static final String K_GAP = "bubble_gap";
+              public static final String K_SHAPE = "avatar_shape";
+              public static final String K_LOBES = "avatar_lobes";
+              public static final String K_DEPTH = "avatar_depth";
+              public static final String K_ROT = "avatar_rot";
+              public static final int GHOST_ITEM_ID = 91370;
+
+              public static final String[] SHAPES = {"Круг", "Суперэллипс", "Многоугольник", "Печенье", "Цветок", "Звезда"};
+              public static final int[] SPY_COLORS = {0xFFFF8A3D, 0xFFFF5252, 0xFF4FC3F7, 0xFF66BB6A, 0xFFB388FF};
+              public static final String[] SPY_COLOR_NAMES = {"Янтарный", "Красный", "Голубой", "Зелёный", "Фиолетовый"};
+              private static final int[] BURST_COLORS = {0xFF7FD6FF, 0xFFFFFFFF, 0xFFB388FF, 0xFF8CF0D0};
+
+              private static final Interpolator SPRING = new Interpolator() {
+                  @Override
+                  public float getInterpolation(float t) {
+                      if (t >= 1f) {
+                          return 1f;
+                      }
+                      return (float) (1.0 - Math.exp(-7.0 * t) * Math.cos(14.0 * t));
+                  }
+              };
+
+              private static final WeakHashMap<View, ValueAnimator> ANIMS = new WeakHashMap<>();
+              private static final LinkedHashSet<Long> ANIMATED = new LinkedHashSet<>();
+              private static final HashMap<Long, Boolean> EDIT_CACHE = new HashMap<>();
+              private static final HashMap<Long, Long> EDIT_TIME = new HashMap<>();
+              private static final WeakHashMap<RecyclerView, Boolean> DECORATED = new WeakHashMap<>();
+              private static final HashMap<String, Integer> SAVED = new HashMap<>();
+              private static final String[] BUBBLE_KEYS = {"key_chat_inBubble", "key_chat_inBubbleSelected"};
+
+              private static volatile long badgeAt;
+              private static long lastBurst;
+              private static int origRadius = -1;
+              private static boolean dynApplied;
+              private static Path unit;
+              private static String unitKey = "";
+
+              private static SharedPreferences sp() {
+                  Context c = ApplicationLoader.applicationContext;
+                  return c == null ? null : c.getSharedPreferences("flux_style", Context.MODE_PRIVATE);
+              }
+
+              public static boolean bool(String key, boolean def) {
+                  try {
+                      SharedPreferences p = sp();
+                      return p == null ? def : p.getBoolean(key, def);
+                  } catch (Throwable t) {
+                      return def;
+                  }
+              }
+
+              public static void setBool(String key, boolean v) {
+                  try {
+                      SharedPreferences p = sp();
+                      if (p != null) {
+                          p.edit().putBoolean(key, v).apply();
+                      }
+                  } catch (Throwable ignore) {
+                  }
+              }
+
+              public static int num(String key, int def) {
+                  try {
+                      SharedPreferences p = sp();
+                      return p == null ? def : p.getInt(key, def);
+                  } catch (Throwable t) {
+                      return def;
+                  }
+              }
+
+              public static void setNum(String key, int v) {
+                  try {
+                      SharedPreferences p = sp();
+                      if (p != null) {
+                          p.edit().putInt(key, v).apply();
+                      }
+                  } catch (Throwable ignore) {
+                  }
+              }
+
+              public static void startup() {
+                  applyRadius();
+              }
+
+              public static void refreshUi() {
+                  try {
+                      NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.didSetNewTheme, false);
+                  } catch (Throwable ignore) {
+                  }
+              }
+
+              public static void springScale(final View v, final float from, long duration, float pivotX, float pivotY) {
+                  try {
+                      ValueAnimator old = ANIMS.get(v);
+                      if (old != null) {
+                          old.cancel();
+                      }
+                      v.setPivotX(pivotX);
+                      v.setPivotY(pivotY);
+                      final ValueAnimator a = ValueAnimator.ofFloat(0f, 1f);
+                      a.setDuration(duration);
+                      a.setInterpolator(SPRING);
+                      a.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                          @Override
+                          public void onAnimationUpdate(ValueAnimator an) {
+                              float s = from + (1f - from) * (Float) an.getAnimatedValue();
+                              v.setScaleX(s);
+                              v.setScaleY(s);
+                          }
+                      });
+                      a.addListener(new AnimatorListenerAdapter() {
+                          @Override
+                          public void onAnimationEnd(Animator animation) {
+                              v.setScaleX(1f);
+                              v.setScaleY(1f);
+                              ANIMS.remove(v);
+                          }
+
+                          @Override
+                          public void onAnimationCancel(Animator animation) {
+                              v.setScaleX(1f);
+                              v.setScaleY(1f);
+                          }
+                      });
+                      ANIMS.put(v, a);
+                      a.start();
+                  } catch (Throwable ignore) {
+                  }
+              }
+
+              public static void springIn(final View v) {
+                  try {
+                      if (v == null || !bool(K_SPRING_UI, true)) {
+                          return;
+                      }
+                      v.post(new Runnable() {
+                          @Override
+                          public void run() {
+                              springScale(v, 0.92f, 480, v.getWidth() / 2f, 0f);
+                          }
+                      });
+                  } catch (Throwable ignore) {
+                  }
+              }
+
+              public static void pop(View v) {
+                  try {
+                      if (v != null && bool(K_SPRING_UI, true)) {
+                          springScale(v, 0.95f, 380, v.getWidth() / 2f, v.getHeight() / 2f);
+                      }
+                  } catch (Throwable ignore) {
+                  }
+              }
+
+              public static void onCellAttached(final View v, final MessageObject mo) {
+                  try {
+                      if (v == null || mo == null || mo.messageOwner == null) {
+                          return;
+                      }
+                      ValueAnimator running = ANIMS.get(v);
+                      if (running != null) {
+                          running.cancel();
+                      }
+                      if (bool(K_SPRING, true)) {
+                          int now = ConnectionsManager.getInstance(UserConfig.selectedAccount).getCurrentTime();
+                          if (Math.abs(now - mo.messageOwner.date) <= 4) {
+                              long key = mo.getDialogId() * 1000003L + mo.getId();
+                              boolean first;
+                              synchronized (ANIMATED) {
+                                  first = ANIMATED.add(key);
+                                  if (ANIMATED.size() > 64) {
+                                      ANIMATED.remove(ANIMATED.iterator().next());
+                                  }
+                              }
+                              if (first) {
+                                  final boolean out = mo.isOutOwner();
+                                  v.post(new Runnable() {
+                                      @Override
+                                      public void run() {
+                                          float px = out ? v.getWidth() - AndroidUtilities.dp(10) : AndroidUtilities.dp(10);
+                                          springScale(v, 0.78f, 560, px, v.getHeight() - AndroidUtilities.dp(6));
+                                      }
+                                  });
+                              }
+                          }
+                      }
+                      if (bool(K_SHL, true)) {
+                          boolean mark = false;
+                          try {
+                              mark = SpyMode.isDeleted(mo) || edited(mo);
+                          } catch (Throwable ignore) {
+                          }
+                          Drawable bg = v.getBackground();
+                          if (mark) {
+                              if (!(bg instanceof Hl)) {
+                                  v.setBackground(new Hl());
+                              }
+                          } else if (bg instanceof Hl) {
+                              v.setBackground(null);
+                          }
+                      }
+                  } catch (Throwable ignore) {
+                  }
+              }
+
+              private static boolean edited(MessageObject mo) {
+                  long key = mo.getDialogId() * 1000003L + mo.getId();
+                  long now = SystemClock.uptimeMillis();
+                  Long at = EDIT_TIME.get(key);
+                  Boolean cached = EDIT_CACHE.get(key);
+                  if (at != null && cached != null && now - at < 5000) {
+                      return cached;
+                  }
+                  boolean r = SpyMode.hasEdits(mo);
+                  if (EDIT_CACHE.size() > 400) {
+                      EDIT_CACHE.clear();
+                      EDIT_TIME.clear();
+                  }
+                  EDIT_CACHE.put(key, r);
+                  EDIT_TIME.put(key, now);
+                  return r;
+              }
+
+              static final class Hl extends Drawable {
+                  private final Paint p = new Paint();
+
+                  @Override
+                  public void draw(Canvas c) {
+                      int base = num(K_SCOLOR, SPY_COLORS[0]);
+                      boolean pulse = bool(K_SPULSE, true);
+                      float k = pulse ? 0.65f + 0.35f * (float) Math.sin(SystemClock.uptimeMillis() / 380.0) : 1f;
+                      p.setColor(base);
+                      p.setAlpha((int) (46 * k + 8));
+                      c.drawRect(getBounds(), p);
+                      if (pulse) {
+                          invalidateSelf();
+                      }
+                  }
+
+                  @Override public void setAlpha(int a) { }
+                  @Override public void setColorFilter(ColorFilter cf) { }
+                  @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+              }
+
+              public static boolean ghostActive() {
+                  try {
+                      return GhostMode.get(GhostMode.KEY_GHOST) && (GhostMode.get(GhostMode.KEY_READ) || GhostMode.get(GhostMode.KEY_STORIES)
+                              || GhostMode.get(GhostMode.KEY_ONLINE) || GhostMode.get(GhostMode.KEY_TYPING) || GhostMode.get(GhostMode.KEY_OFFLINE));
+                  } catch (Throwable t) {
+                      return false;
+                  }
+              }
+
+              private static String ghostNames() {
+                  StringBuilder sb = new StringBuilder();
+                  if (GhostMode.get(GhostMode.KEY_READ)) sb.append("чтение, ");
+                  if (GhostMode.get(GhostMode.KEY_STORIES)) sb.append("истории, ");
+                  if (GhostMode.get(GhostMode.KEY_ONLINE)) sb.append("онлайн, ");
+                  if (GhostMode.get(GhostMode.KEY_TYPING)) sb.append("набор, ");
+                  if (GhostMode.get(GhostMode.KEY_OFFLINE)) sb.append("офлайн, ");
+                  if (sb.length() > 2) {
+                      sb.setLength(sb.length() - 2);
+                  }
+                  return sb.toString();
+              }
+
+              static final class Eye extends Drawable {
+                  private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Path path = new Path();
+
+                  @Override
+                  public void draw(Canvas c) {
+                      Rect b = getBounds();
+                      float cx = b.exactCenterX();
+                      float cy = b.exactCenterY();
+                      float w = Math.max(Math.min(b.width(), b.height()), AndroidUtilities.dp(20)) * 0.9f;
+                      boolean on = ghostActive();
+                      p.setColor(Theme.getColor(Theme.key_actionBarDefaultIcon));
+                      p.setAlpha(on ? 255 : 150);
+                      p.setStyle(Paint.Style.STROKE);
+                      p.setStrokeWidth(AndroidUtilities.dpf2(1.8f));
+                      p.setStrokeCap(Paint.Cap.ROUND);
+                      float hw = w * 0.5f;
+                      float hh = w * 0.26f;
+                      path.reset();
+                      path.moveTo(cx - hw, cy);
+                      path.quadTo(cx, cy - hh * 2f, cx + hw, cy);
+                      path.quadTo(cx, cy + hh * 2f, cx - hw, cy);
+                      c.drawPath(path, p);
+                      p.setStyle(Paint.Style.FILL);
+                      c.drawCircle(cx, cy, w * 0.13f, p);
+                      if (on) {
+                          p.setStyle(Paint.Style.STROKE);
+                          c.drawLine(cx - hw * 0.75f, cy - hw * 0.62f, cx + hw * 0.75f, cy + hw * 0.62f, p);
+                      }
+                  }
+
+                  @Override public int getIntrinsicWidth() { return AndroidUtilities.dp(24); }
+                  @Override public int getIntrinsicHeight() { return AndroidUtilities.dp(24); }
+                  @Override public void setAlpha(int a) { }
+                  @Override public void setColorFilter(ColorFilter cf) { }
+                  @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+              }
+
+              public static void addGhostItem(ActionBarMenu menu) {
+                  try {
+                      if (menu == null || !bool(K_GICON, true)) {
+                          return;
+                      }
+                      final Eye eye = new Eye();
+                      ActionBarMenuItem it = menu.addItem(GHOST_ITEM_ID, eye);
+                      it.setOnClickListener(new View.OnClickListener() {
+                          @Override
+                          public void onClick(View v) {
+                              try {
+                                  GhostMode.set(GhostMode.KEY_GHOST, !GhostMode.get(GhostMode.KEY_GHOST));
+                                  eye.invalidateSelf();
+                                  String msg = ghostActive() ? "Призрак включён: " + ghostNames() : "Призрак выключен";
+                                  Toast.makeText(v.getContext(), msg, Toast.LENGTH_SHORT).show();
+                              } catch (Throwable ignore) {
+                              }
+                          }
+                      });
+                  } catch (Throwable t) {
+                      FileLog.e(t);
+                  }
+              }
+
+              public static void badgeTap() {
+                  if (bool(K_PTAP, true)) {
+                      badgeAt = SystemClock.uptimeMillis();
+                  }
+              }
+
+              public static float burstFactor() {
+                  long e = SystemClock.uptimeMillis() - badgeAt;
+                  if (badgeAt == 0 || e < 0 || e > 900) {
+                      return 0f;
+                  }
+                  float t = e / 900f;
+                  return (float) Math.sin(Math.PI * Math.pow(t, 0.6));
+              }
+
+              static final class BurstView extends View {
+                  private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Path star = new Path();
+                  private final float[] ang = new float[16];
+                  private final float[] dist = new float[16];
+                  private final float[] size = new float[16];
+                  float t;
+
+                  BurstView(Context c) {
+                      super(c);
+                      java.util.Random r = new java.util.Random();
+                      for (int i = 0; i < ang.length; i++) {
+                          ang[i] = (float) (r.nextFloat() * Math.PI * 2);
+                          dist[i] = AndroidUtilities.dp(26 + r.nextInt(40));
+                          size[i] = AndroidUtilities.dpf2(1.6f + r.nextFloat() * 2.2f);
+                      }
+                  }
+
+                  @Override
+                  protected void onDraw(Canvas canvas) {
+                      float cx = getWidth() / 2f;
+                      float cy = getHeight() / 2f;
+                      float e = 1f - (1f - t) * (1f - t);
+                      for (int i = 0; i < ang.length; i++) {
+                          float px = cx + (float) Math.cos(ang[i]) * dist[i] * e;
+                          float py = cy + (float) Math.sin(ang[i]) * dist[i] * e;
+                          p.setColor(BURST_COLORS[i % BURST_COLORS.length]);
+                          p.setAlpha((int) (255 * (1f - t)));
+                          float r = size[i] * (1f - 0.5f * t);
+                          if (i % 3 == 0) {
+                              star.reset();
+                              float s = r * 2.2f;
+                              star.moveTo(px, py - s);
+                              star.quadTo(px, py, px + s, py);
+                              star.quadTo(px, py, px, py + s);
+                              star.quadTo(px, py, px - s, py);
+                              star.quadTo(px, py, px, py - s);
+                              star.close();
+                              canvas.drawPath(star, p);
+                          } else {
+                              canvas.drawCircle(px, py, r, p);
+                          }
+                      }
+                  }
+              }
+
+              public static void burstOnce(View anchor) {
+                  long now = SystemClock.uptimeMillis();
+                  if (now - lastBurst < 350) {
+                      return;
+                  }
+                  lastBurst = now;
+                  burst(anchor);
+              }
+
+              public static void burst(View anchor) {
+                  try {
+                      if (anchor == null || !bool(K_BURST, true)) {
+                          return;
+                      }
+                      Context c = anchor.getContext();
+                      Activity act = null;
+                      while (c instanceof ContextWrapper) {
+                          if (c instanceof Activity) {
+                              act = (Activity) c;
+                              break;
+                          }
+                          c = ((ContextWrapper) c).getBaseContext();
+                      }
+                      if (act == null) {
+                          return;
+                      }
+                      int[] loc = new int[2];
+                      anchor.getLocationInWindow(loc);
+                      float x = loc[0] + anchor.getWidth() - AndroidUtilities.dp(28);
+                      float y = loc[1] + anchor.getHeight() - AndroidUtilities.dp(26);
+                      final ViewGroup decor = (ViewGroup) act.getWindow().getDecorView();
+                      final int size = AndroidUtilities.dp(180);
+                      final BurstView bv = new BurstView(act);
+                      FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(size, size);
+                      lp.leftMargin = (int) (x - size / 2f);
+                      lp.topMargin = (int) (y - size / 2f);
+                      decor.addView(bv, lp);
+                      ValueAnimator a = ValueAnimator.ofFloat(0f, 1f);
+                      a.setDuration(650);
+                      a.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                          @Override
+                          public void onAnimationUpdate(ValueAnimator an) {
+                              bv.t = (Float) an.getAnimatedValue();
+                              bv.invalidate();
+                          }
+                      });
+                      a.addListener(new AnimatorListenerAdapter() {
+                          @Override
+                          public void onAnimationEnd(Animator animation) {
+                              try {
+                                  decor.removeView(bv);
+                              } catch (Throwable ignore) {
+                              }
+                          }
+                      });
+                      a.start();
+                  } catch (Throwable ignore) {
+                  }
+              }
+
+              public static void decorate(RecyclerView rv) {
+                  try {
+                      if (rv == null || DECORATED.containsKey(rv)) {
+                          return;
+                      }
+                      DECORATED.put(rv, true);
+                      rv.addItemDecoration(new RecyclerView.ItemDecoration() {
+                          @Override
+                          public void getItemOffsets(Rect outRect, View view, RecyclerView parent, RecyclerView.State state) {
+                              int g = num(K_GAP, 0);
+                              if (g > 0) {
+                                  outRect.top = AndroidUtilities.dp(g);
+                              }
+                          }
+                      });
+                  } catch (Throwable ignore) {
+                  }
+              }
+
+              public static void applyRadius() {
+                  try {
+                      Field f = SharedConfig.class.getDeclaredField("bubbleRadius");
+                      f.setAccessible(true);
+                      if (origRadius < 0) {
+                          origRadius = f.getInt(null);
+                      }
+                      int r = num(K_RADIUS, 0);
+                      f.setInt(null, r > 0 ? r : origRadius);
+                  } catch (Throwable ignore) {
+                  }
+              }
+
+              private static float radial(int shape, int lobes, int depth, double th) {
+                  double d = depth / 100.0;
+                  int k = Math.max(3, lobes);
+                  switch (shape) {
+                      case 1: {
+                          double n = 2.0 + d * 6.0;
+                          double c = Math.abs(Math.cos(th));
+                          double s = Math.abs(Math.sin(th));
+                          return (float) Math.pow(Math.pow(c, n) + Math.pow(s, n), -1.0 / n);
+                      }
+                      case 2: {
+                          double seg = 2 * Math.PI / k;
+                          double a = ((th % seg) + seg) % seg - seg / 2;
+                          double rp = Math.cos(Math.PI / k) / Math.cos(a);
+                          return (float) (rp + (1.0 - rp) * d);
+                      }
+                      case 3:
+                          return (float) (1.0 + (0.03 + 0.14 * d) * Math.cos(k * th));
+                      case 4:
+                          return (float) (1.0 - 0.55 * d * (1.0 - Math.abs(Math.cos(k * th / 2.0))));
+                      case 5:
+                          return (float) (1.0 - 0.6 * d * Math.pow(0.5 - 0.5 * Math.cos(k * th), 0.6));
+                      default:
+                          return 1f;
+                  }
+              }
+
+              private static Path build(int shape, int lobes, int depth, int rot) {
+                  int n = 240;
+                  float[] r = new float[n];
+                  float max = 0.0001f;
+                  double rr = Math.toRadians(rot);
+                  for (int i = 0; i < n; i++) {
+                      double th = 2 * Math.PI * i / n;
+                      r[i] = Math.max(0.05f, radial(shape, lobes, depth, th - rr));
+                      if (r[i] > max) {
+                          max = r[i];
+                      }
+                  }
+                  Path p = new Path();
+                  for (int i = 0; i < n; i++) {
+                      double th = 2 * Math.PI * i / n;
+                      float x = (float) Math.cos(th) * r[i] / max;
+                      float y = (float) Math.sin(th) * r[i] / max;
+                      if (i == 0) {
+                          p.moveTo(x, y);
+                      } else {
+                          p.lineTo(x, y);
+                      }
+                  }
+                  p.close();
+                  return p;
+              }
+
+              public static Path shapePath() {
+                  int shape = num(K_SHAPE, 0);
+                  int lobes = num(K_LOBES, 8);
+                  int depth = num(K_DEPTH, 50);
+                  int rot = num(K_ROT, 0);
+                  String key = shape + "|" + lobes + "|" + depth + "|" + rot;
+                  if (unit == null || !key.equals(unitKey)) {
+                      unit = build(shape, lobes, depth, rot);
+                      unitKey = key;
+                  }
+                  return unit;
+              }
+
+              public static boolean avatarBegin(Canvas c, float x, float y, float w, float h, int round) {
+                  try {
+                      if (num(K_SHAPE, 0) == 0 || round <= 0) {
+                          return false;
+                      }
+                      if (Math.abs(w - h) > 2f || w < AndroidUtilities.dp(16) || w > AndroidUtilities.dp(140)) {
+                          return false;
+                      }
+                      if (round * 2 < w - 2f) {
+                          return false;
+                      }
+                      Path p = shapePath();
+                      float r = w * 0.5f;
+                      float cx = x + r;
+                      float cy = y + r;
+                      c.save();
+                      c.translate(cx, cy);
+                      c.scale(r, r);
+                      c.clipPath(p);
+                      c.scale(1f / r, 1f / r);
+                      c.translate(-cx, -cy);
+                      return true;
+                  } catch (Throwable t) {
+                      return false;
+                  }
+              }
+
+              private static boolean accepts(Class<?> c, Object key) {
+                  return (c == int.class && key instanceof Integer) || (!c.isPrimitive() && c.isInstance(key));
+              }
+
+              private static Integer themeGet(Object key) {
+                  for (Method m : Theme.class.getMethods()) {
+                      if (!m.getName().equals("getColor") || !Modifier.isStatic(m.getModifiers())) {
+                          continue;
+                      }
+                      Class<?>[] pt = m.getParameterTypes();
+                      if (pt.length == 1 && accepts(pt[0], key)) {
+                          try {
+                              return (Integer) m.invoke(null, key);
+                          } catch (Throwable ignore) {
+                          }
+                      }
+                  }
+                  return null;
+              }
+
+              private static boolean themeSet(Object key, int color) {
+                  for (Method m : Theme.class.getMethods()) {
+                      if (!m.getName().equals("setColor") || !Modifier.isStatic(m.getModifiers())) {
+                          continue;
+                      }
+                      Class<?>[] pt = m.getParameterTypes();
+                      if (pt.length == 3 && pt[1] == int.class && pt[2] == boolean.class && accepts(pt[0], key)) {
+                          try {
+                              m.invoke(null, key, color, false);
+                              return true;
+                          } catch (Throwable ignore) {
+                          }
+                      }
+                  }
+                  return false;
+              }
+
+              private static int avatarColor(int acc, long did) {
+                  try {
+                      TLRPC.FileLocation loc = null;
+                      if (did > 0) {
+                          TLRPC.User u = MessagesController.getInstance(acc).getUser(did);
+                          if (u != null && u.photo != null) {
+                              loc = u.photo.photo_small;
+                          }
+                      } else if (did < 0) {
+                          TLRPC.Chat ch = MessagesController.getInstance(acc).getChat(-did);
+                          if (ch != null && ch.photo != null) {
+                              loc = ch.photo.photo_small;
+                          }
+                      }
+                      if (loc == null) {
+                          return 0;
+                      }
+                      File f = FileLoader.getInstance(acc).getPathToAttach(loc, true);
+                      if (f == null || !f.exists()) {
+                          return 0;
+                      }
+                      BitmapFactory.Options o = new BitmapFactory.Options();
+                      o.inSampleSize = 4;
+                      Bitmap bm = BitmapFactory.decodeFile(f.getAbsolutePath(), o);
+                      if (bm == null) {
+                          return 0;
+                      }
+                      double rs = 0, gs = 0, bs = 0, ws = 0;
+                      float[] hsv = new float[3];
+                      int step = Math.max(1, Math.min(bm.getWidth(), bm.getHeight()) / 24);
+                      for (int y = 0; y < bm.getHeight(); y += step) {
+                          for (int x = 0; x < bm.getWidth(); x += step) {
+                              int px = bm.getPixel(x, y);
+                              Color.colorToHSV(px, hsv);
+                              double w = 0.05 + hsv[1] * hsv[2];
+                              rs += Color.red(px) * w;
+                              gs += Color.green(px) * w;
+                              bs += Color.blue(px) * w;
+                              ws += w;
+                          }
+                      }
+                      bm.recycle();
+                      if (ws <= 0) {
+                          return 0;
+                      }
+                      int dom = Color.rgb((int) (rs / ws), (int) (gs / ws), (int) (bs / ws));
+                      Color.colorToHSV(dom, hsv);
+                      boolean dark = Theme.isCurrentThemeDark();
+                      hsv[1] = Math.min(0.5f, Math.max(0.15f, hsv[1] * 0.7f));
+                      hsv[2] = dark ? 0.30f : 0.94f;
+                      return Color.HSVToColor(hsv);
+                  } catch (Throwable t) {
+                      return 0;
+                  }
+              }
+
+              private static void restoreColors() {
+                  if (!dynApplied) {
+                      return;
+                  }
+                  dynApplied = false;
+                  try {
+                      for (String f : BUBBLE_KEYS) {
+                          Integer orig = SAVED.get(f);
+                          if (orig != null) {
+                              themeSet(Theme.class.getField(f).get(null), orig);
+                          }
+                      }
+                  } catch (Throwable ignore) {
+                  }
+                  refreshUi();
+              }
+
+              public static void onChatResume(int acc, long did) {
+                  try {
+                      if (!bool(K_DYN, false)) {
+                          restoreColors();
+                          return;
+                      }
+                      int col = avatarColor(acc, did);
+                      if (col == 0) {
+                          restoreColors();
+                          return;
+                      }
+                      boolean any = false;
+                      for (String f : BUBBLE_KEYS) {
+                          Object key = Theme.class.getField(f).get(null);
+                          if (!SAVED.containsKey(f)) {
+                              Integer orig = themeGet(key);
+                              if (orig != null) {
+                                  SAVED.put(f, orig);
+                              }
+                          }
+                          any |= themeSet(key, col);
+                      }
+                      if (any) {
+                          dynApplied = true;
+                          refreshUi();
+                      }
+                  } catch (Throwable ignore) {
+                  }
+              }
+
+              public static void onChatPause() {
+                  try {
+                      restoreColors();
+                  } catch (Throwable ignore) {
+                  }
+              }
+          }'''
+          ACT_JAVA = r'''package org.telegram.ui;
+
+          import android.content.Context;
+          import android.graphics.Canvas;
+          import android.graphics.Paint;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.SeekBar;
+          import android.widget.TextView;
+
+          import org.telegram.messenger.AndroidUtilities;
+          import org.telegram.messenger.FluxStyle;
+          import org.telegram.messenger.R;
+          import org.telegram.ui.ActionBar.ActionBar;
+          import org.telegram.ui.ActionBar.AlertDialog;
+          import org.telegram.ui.ActionBar.BaseFragment;
+          import org.telegram.ui.ActionBar.Theme;
+          import org.telegram.ui.Cells.HeaderCell;
+          import org.telegram.ui.Cells.TextCheckCell;
+          import org.telegram.ui.Cells.TextSettingsCell;
+
+          public class FluxStyleActivity extends BaseFragment {
+
+              private Preview preview;
+              private TextSettingsCell shapeCell;
+              private TextSettingsCell spyColorCell;
+
+              private class Preview extends View {
+                  private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+                  Preview(Context c) {
+                      super(c);
+                  }
+
+                  @Override
+                  protected void onDraw(Canvas canvas) {
+                      float r = Math.min(getWidth(), getHeight()) * 0.42f;
+                      p.setColor(0xFF8E7CFF);
+                      canvas.save();
+                      canvas.translate(getWidth() / 2f, getHeight() / 2f);
+                      canvas.scale(r, r);
+                      canvas.drawPath(FluxStyle.shapePath(), p);
+                      canvas.restore();
+                  }
+              }
+
+              @Override
+              public View createView(final Context context) {
+                  actionBar.setBackButtonImage(R.drawable.ic_ab_back);
+                  actionBar.setAllowOverlayTitle(true);
+                  actionBar.setTitle("Визуал и стиль");
+                  actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
+                      @Override
+                      public void onItemClick(int id) {
+                          if (id == -1) {
+                              finishFragment();
+                          }
+                      }
+                  });
+
+                  FrameLayout root = new FrameLayout(context);
+                  root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
+                  fragmentView = root;
+
+                  ScrollView scroll = new ScrollView(context);
+                  root.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                  LinearLayout list = new LinearLayout(context);
+                  list.setOrientation(LinearLayout.VERTICAL);
+                  scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  addHeader(list, context, "Анимации");
+                  addSwitch(list, context, "Пружинное появление пузырей", FluxStyle.K_SPRING, true, true);
+                  addSwitch(list, context, "Пружинные экраны FluxGram", FluxStyle.K_SPRING_UI, true, true);
+                  addSwitch(list, context, "Частицы разлетаются по тапу на значок", FluxStyle.K_PTAP, true, true);
+                  addSwitch(list, context, "Вспышка частиц при отправке", FluxStyle.K_BURST, true, false);
+
+                  addHeader(list, context, "Пузыри");
+                  addSlider(list, context, "Радиус углов", FluxStyle.K_RADIUS, 0, 30, 0, true, "", null);
+                  addSlider(list, context, "Отступ между сообщениями", FluxStyle.K_GAP, 0, 16, 0, false, " dp", null);
+                  addSwitch(list, context, "Цвет пузыря по аватарке собеседника", FluxStyle.K_DYN, false, false);
+                  addNote(list, context, "Экспериментально: цвет входящих пузырей берётся из кэшированной аватарки чата и снимается при выходе из него.");
+
+                  addHeader(list, context, "Призрак");
+                  addSwitch(list, context, "Глаз призрака в шапке списка чатов", FluxStyle.K_GICON, true, false);
+                  addNote(list, context, "Перечёркнутый глаз значит, что призрак включён. Тап переключает. Применяется после перезапуска приложения.");
+
+                  addHeader(list, context, "Режим шпиона");
+                  addSwitch(list, context, "Подсвечивать удалённые и изменённые", FluxStyle.K_SHL, true, true);
+                  addSwitch(list, context, "Мягкий пульс подсветки", FluxStyle.K_SPULSE, true, true);
+                  spyColorCell = new TextSettingsCell(context);
+                  spyColorCell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  spyColorCell.setOnClickListener(v -> {
+                      AlertDialog.Builder b = new AlertDialog.Builder(context);
+                      b.setTitle("Цвет подсветки");
+                      b.setItems(FluxStyle.SPY_COLOR_NAMES, (dialog, which) -> {
+                          FluxStyle.setNum(FluxStyle.K_SCOLOR, FluxStyle.SPY_COLORS[which]);
+                          updateCells();
+                      });
+                      showDialog(b.create());
+                  });
+                  list.addView(spyColorCell, matchWrap());
+
+                  addHeader(list, context, "Форма аватарок");
+                  preview = new Preview(context);
+                  preview.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  list.addView(preview, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, AndroidUtilities.dp(150)));
+                  shapeCell = new TextSettingsCell(context);
+                  shapeCell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  shapeCell.setOnClickListener(v -> {
+                      AlertDialog.Builder b = new AlertDialog.Builder(context);
+                      b.setTitle("Форма");
+                      b.setItems(FluxStyle.SHAPES, (dialog, which) -> {
+                          FluxStyle.setNum(FluxStyle.K_SHAPE, which);
+                          updateCells();
+                          preview.invalidate();
+                          FluxStyle.refreshUi();
+                      });
+                      showDialog(b.create());
+                  });
+                  list.addView(shapeCell, matchWrap());
+                  Runnable shapeChanged = () -> preview.invalidate();
+                  addSlider(list, context, "Количество лепестков / сторон", FluxStyle.K_LOBES, 3, 14, 8, false, "", shapeChanged);
+                  addSlider(list, context, "Выраженность формы", FluxStyle.K_DEPTH, 0, 100, 50, false, " %", shapeChanged);
+                  addSlider(list, context, "Поворот", FluxStyle.K_ROT, 0, 359, 0, false, "°", shapeChanged);
+                  addNote(list, context, "Форма применяется ко всем круглым аватаркам: список чатов, шапка чата, профиль. «Круг» возвращает обычный вид.");
+
+                  updateCells();
+                  FluxStyle.springIn(root);
+                  return fragmentView;
+              }
+
+              private void updateCells() {
+                  int shape = FluxStyle.num(FluxStyle.K_SHAPE, 0);
+                  shapeCell.setTextAndValue("Форма", FluxStyle.SHAPES[Math.max(0, Math.min(shape, FluxStyle.SHAPES.length - 1))], false);
+                  int col = FluxStyle.num(FluxStyle.K_SCOLOR, FluxStyle.SPY_COLORS[0]);
+                  String name = FluxStyle.SPY_COLOR_NAMES[0];
+                  for (int i = 0; i < FluxStyle.SPY_COLORS.length; i++) {
+                      if (FluxStyle.SPY_COLORS[i] == col) {
+                          name = FluxStyle.SPY_COLOR_NAMES[i];
+                      }
+                  }
+                  spyColorCell.setTextAndValue("Цвет подсветки", name, false);
+              }
+
+              private LinearLayout.LayoutParams matchWrap() {
+                  return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+              }
+
+              private void addHeader(LinearLayout list, Context context, String title) {
+                  HeaderCell header = new HeaderCell(context);
+                  header.setText(title);
+                  header.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  list.addView(header, matchWrap());
+              }
+
+              private void addSwitch(LinearLayout list, Context context, String title, final String key, final boolean def, boolean divider) {
+                  final TextCheckCell cell = new TextCheckCell(context);
+                  cell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  cell.setTextAndCheck(title, FluxStyle.bool(key, def), divider);
+                  cell.setOnClickListener(v -> {
+                      boolean value = !FluxStyle.bool(key, def);
+                      FluxStyle.setBool(key, value);
+                      cell.setChecked(value);
+                      FluxStyle.pop(cell);
+                  });
+                  list.addView(cell, matchWrap());
+              }
+
+              private void addNote(LinearLayout list, Context context, String text) {
+                  TextView note = new TextView(context);
+                  note.setText(text);
+                  note.setTextSize(14);
+                  note.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+                  note.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(10), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
+                  list.addView(note, matchWrap());
+              }
+
+              private void addSlider(LinearLayout list, Context context, final String title, final String key, final int min, final int max,
+                                     int def, final boolean zeroDefault, final String unit, final Runnable after) {
+                  LinearLayout box = new LinearLayout(context);
+                  box.setOrientation(LinearLayout.VERTICAL);
+                  box.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  final TextView label = new TextView(context);
+                  label.setTextSize(16);
+                  label.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                  label.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(12), AndroidUtilities.dp(21), 0);
+                  box.addView(label, matchWrap());
+                  final SeekBar bar = new SeekBar(context);
+                  bar.setMax(max - min);
+                  int cur = FluxStyle.num(key, def);
+                  bar.setProgress(Math.max(0, Math.min(max - min, cur - min)));
+                  bar.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(6), AndroidUtilities.dp(21), AndroidUtilities.dp(12));
+                  box.addView(bar, matchWrap());
+                  label.setText(sliderText(title, cur, zeroDefault, unit));
+                  bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override
+                      public void onProgressChanged(SeekBar sb, int progress, boolean fromUser) {
+                          int v = progress + min;
+                          FluxStyle.setNum(key, v);
+                          label.setText(sliderText(title, v, zeroDefault, unit));
+                          if (FluxStyle.K_RADIUS.equals(key)) {
+                              FluxStyle.applyRadius();
+                          }
+                          if (after != null) {
+                              after.run();
+                          }
+                      }
+
+                      @Override
+                      public void onStartTrackingTouch(SeekBar sb) { }
+
+                      @Override
+                      public void onStopTrackingTouch(SeekBar sb) {
+                          FluxStyle.refreshUi();
+                      }
+                  });
+                  list.addView(box, matchWrap());
+              }
+
+              private String sliderText(String title, int v, boolean zeroDefault, String unit) {
+                  return title + ": " + (zeroDefault && v == 0 ? "по умолчанию" : v + unit);
+              }
+          }'''
+
+          wr(SRC + "/org/telegram/messenger/FluxStyle.java", STYLE_JAVA)
+          wr(SRC + "/org/telegram/ui/FluxStyleActivity.java", ACT_JAVA)
+          ok("FluxStyle.java и FluxStyleActivity.java созданы")
+
+          def first_match(pat, s, flags=0):
+              m = re.search(pat, s, flags)
+              return m
+
+          p = find("ImageReceiver.java")
+          if p:
+              s = rd(p)
+              if "fluxRound" in s:
+                  ok("ImageReceiver: уже пропатчен")
+              else:
+                  draw = re.compile(r'public\s+boolean\s+draw\s*\(\s*(?:final\s+)?Canvas\s+(\w+)\s*\)\s*\{')
+                  cls = re.search(r'public\s+class\s+ImageReceiver\b[^{]*\{', s)
+                  dm = draw.findall(s)
+                  if len(dm) != 1 or not cls:
+                      warn("ImageReceiver: draw(Canvas) не найден или не один (%d) - формы аватарок не применятся" % len(dm))
+                  else:
+                      def wrap(m):
+                          c = m.group(1)
+                          return ("public boolean draw(Canvas %s) {\n"
+                                  "        boolean fluxClip = org.telegram.messenger.FluxStyle.avatarBegin(%s, getImageX(), getImageY(), getImageWidth(), getImageHeight(), fluxRound);\n"
+                                  "        try {\n"
+                                  "            return drawFluxOrig(%s);\n"
+                                  "        } finally {\n"
+                                  "            if (fluxClip) {\n"
+                                  "                %s.restore();\n"
+                                  "            }\n"
+                                  "        }\n"
+                                  "    }\n\n"
+                                  "    public boolean drawFluxOrig(Canvas %s) {") % (c, c, c, c, c)
+                      s = draw.sub(wrap, s, count=1)
+                      cls = re.search(r'public\s+class\s+ImageReceiver\b[^{]*\{', s)
+                      s = s[:cls.end()] + "\n    private int fluxRound;\n" + s[cls.end():]
+                      n1 = re.compile(r'(public\s+void\s+setRoundRadius\s*\(\s*int\s+(\w+)\s*\)\s*\{)')
+                      n2 = re.compile(r'(public\s+void\s+setRoundRadius\s*\(\s*int\s*\[\]\s+(\w+)\s*\)\s*\{)')
+                      c1 = len(n1.findall(s)); c2 = len(n2.findall(s))
+                      s = n1.sub(lambda m: m.group(1) + " fluxRound = " + m.group(2) + ";", s)
+                      s = n2.sub(lambda m: m.group(1) + " if (" + m.group(2) + " != null && " + m.group(2) + ".length > 0) { fluxRound = " + m.group(2) + "[0]; }", s)
+                      wr(p, s)
+                      if c1 + c2 == 0:
+                          warn("ImageReceiver: setRoundRadius не найден - радиус не отслеживается, формы не включатся")
+                      else:
+                          ok("ImageReceiver: клип формы аватарок (setRoundRadius: int=%d, int[]=%d)" % (c1, c2))
+          else:
+              warn("ImageReceiver.java не найден")
+
+          p = find("ChatMessageCell.java")
+          if p:
+              s = rd(p)
+              if "FluxStyle.onCellAttached" in s:
+                  ok("ChatMessageCell: уже пропатчен")
+              else:
+                  hit = None
+                  for m in re.finditer(r'void\s+onAttachedToWindow\s*\(\s*\)\s*\{', s):
+                      tail = s[m.end():m.end() + 1500]
+                      if "currentMessageObject" in tail or "messageObjectToSet" in tail:
+                          hit = m
+                          break
+                  if not hit:
+                      warn("ChatMessageCell: onAttachedToWindow не найден - пружина пузырей и подсветка шпиона не добавлены")
+                  else:
+                      s = s[:hit.end()] + "\n        org.telegram.messenger.FluxStyle.onCellAttached(this, getMessageObject());" + s[hit.end():]
+                      wr(p, s)
+                      ok("ChatMessageCell: пружина пузырей и подсветка удалённых/изменённых")
+          else:
+              warn("ChatMessageCell.java не найден")
+
+          p = find("ChatActivity.java")
+          if p:
+              s = rd(p)
+              if "FluxStyle.onChatResume" in s:
+                  ok("ChatActivity: уже пропатчен")
+              else:
+                  a = re.compile(r'(public\s+void\s+onResume\s*\(\s*\)\s*\{\s*super\.onResume\(\);)')
+                  b = re.compile(r'(public\s+void\s+onPause\s*\(\s*\)\s*\{\s*super\.onPause\(\);)')
+                  d = re.compile(r'(chatListView\.setAdapter\(chatAdapter\);)')
+                  if a.search(s):
+                      s = a.sub(lambda m: m.group(1) + "\n        org.telegram.messenger.FluxStyle.onChatResume(currentAccount, dialog_id);", s, count=1)
+                      ok("ChatActivity: цвета чата по аватарке (onResume)")
+                  else:
+                      warn("ChatActivity: onResume не найден - динамические цвета не работают")
+                  if b.search(s):
+                      s = b.sub(lambda m: m.group(1) + "\n        org.telegram.messenger.FluxStyle.onChatPause();", s, count=1)
+                  else:
+                      warn("ChatActivity: onPause не найден - цвета чата не снимутся при выходе")
+                  nd = len(d.findall(s))
+                  if nd:
+                      s = d.sub(lambda m: m.group(1) + "\n        org.telegram.messenger.FluxStyle.decorate(chatListView);", s)
+                      ok("ChatActivity: отступ между сообщениями (%d)" % nd)
+                  else:
+                      warn("ChatActivity: chatListView.setAdapter(chatAdapter) не найден - отступ между сообщениями не добавлен")
+                  wr(p, s)
+          else:
+              warn("ChatActivity.java не найден")
+
+          p = find("DialogsActivity.java")
+          if p:
+              s = rd(p)
+              if "FluxStyle.addGhostItem" in s:
+                  ok("DialogsActivity: уже пропатчен")
+              else:
+                  m = re.search(r'ActionBarMenu\s+(\w+)\s*=\s*actionBar\.createMenu\(\);', s)
+                  if not m:
+                      warn("DialogsActivity: actionBar.createMenu() не найден - значок призрака не добавлен")
+                  else:
+                      s = s[:m.end()] + "\n            org.telegram.messenger.FluxStyle.addGhostItem(" + m.group(1) + ");" + s[m.end():]
+                      wr(p, s)
+                      ok("DialogsActivity: значок призрака (глаз) в шапке списка чатов")
+          else:
+              warn("DialogsActivity.java не найден")
+
+          p = find("ChatActivityEnterView.java")
+          if p:
+              s = rd(p)
+              if "FluxStyle.burstOnce" in s:
+                  ok("ChatActivityEnterView: уже пропатчен")
+              else:
+                  pat = re.compile(r'((?:private|public|protected)\s+(?:final\s+)?void\s+(?:sendMessageInternal|sendMessage)\s*\([^)]*\)\s*\{)')
+                  n = len(pat.findall(s))
+                  if n == 0:
+                      warn("ChatActivityEnterView: sendMessage/sendMessageInternal не найдены - вспышка при отправке не добавлена")
+                  else:
+                      s = pat.sub(lambda m: m.group(1) + "\n        org.telegram.messenger.FluxStyle.burstOnce(this);", s)
+                      wr(p, s)
+                      ok("ChatActivityEnterView: вспышка частиц при отправке (методов: %d)" % n)
+          else:
+              warn("ChatActivityEnterView.java не найден")
+
+          p = find("FluxBadgeDrawable.java")
+          if p:
+              s = rd(p)
+              if "FluxStyle.burstFactor" in s:
+                  ok("FluxBadgeDrawable: уже пропатчен")
+              else:
+                  old1 = "float r = s * (0.40f + 0.06f * pulse);"
+                  old2 = "if (animated && particles) {"
+                  if old1 in s and old2 in s:
+                      s = s.replace(old1, "float r = s * (0.40f + 0.06f * pulse + org.telegram.messenger.FluxStyle.burstFactor() * (0.5f + 0.1f * (i % 3)));", 1)
+                      s = s.replace(old2, "if ((animated && particles) || org.telegram.messenger.FluxStyle.burstFactor() > 0f) {", 1)
+                      wr(p, s)
+                      ok("FluxBadgeDrawable: разлёт частиц по тапу")
+                  else:
+                      warn("FluxBadgeDrawable: не нашёл строки радиуса частиц или invalidate - разлёта не будет")
+          else:
+              warn("FluxBadgeDrawable.java не найден")
+
+          p = find("FluxBadge.java")
+          if p:
+              s = rd(p)
+              if "FluxStyle.badgeTap" in s:
+                  ok("FluxBadge: уже пропатчен")
+              else:
+                  m = re.search(r'public\s+static\s+void\s+showInfo\s*\(\s*Context\s+\w+\s*\)\s*\{', s)
+                  if m:
+                      s = s[:m.end()] + "\n        org.telegram.messenger.FluxStyle.badgeTap();" + s[m.end():]
+                      wr(p, s)
+                      ok("FluxBadge: тап по значку запускает разлёт частиц")
+                  else:
+                      warn("FluxBadge: showInfo не найден - тап не запускает разлёт")
+          else:
+              warn("FluxBadge.java не найден")
+
+          hp = find("FluxHubActivity.java")
+          if hp:
+              h = rd(hp)
+              if "FluxStyleActivity" in h:
+                  ok("FluxHub: пункт уже добавлен")
+              else:
+                  m = re.search(r'(?m)^([ \t]*)return fragmentView;', h)
+                  if not m:
+                      warn("FluxHub: не нашёл return fragmentView - пункт «Визуал и стиль» не добавлен")
+                  else:
+                      ind = m.group(1)
+                      lp = "new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)"
+                      block = ("TextSettingsCell fluxStyle = new TextSettingsCell(context);\n"
+                               "fluxStyle.setText(\"Визуал и стиль\", false);\n"
+                               "fluxStyle.setOnClickListener(v -> presentFragment(new FluxStyleActivity()));\n"
+                               "c.addView(fluxStyle, " + lp + ");\n")
+                      block = "".join(ind + l + "\n" for l in block.rstrip("\n").split("\n")) + "\n"
+                      h = h[:m.start()] + block + h[m.start():]
+                      wr(hp, h)
+                      ok("FluxHub: добавлен пункт «Визуал и стиль»")
+          else:
+              warn("FluxHubActivity.java не найден - экран «Визуал и стиль» не подключён")
+
+          for nm in ("FluxHubActivity.java", "FluxThemesActivity.java", "AutoReplySettingsActivity.java", "SpySettingsActivity.java", "GhostSettingsActivity.java"):
+              q = find(nm)
+              if not q:
+                  continue
+              t = rd(q)
+              if "FluxStyle.springIn" in t:
+                  continue
+              t2, n = re.subn(r'(?m)^([ \t]*)return fragmentView;', lambda m: m.group(1) + "org.telegram.messenger.FluxStyle.springIn(fragmentView);\n" + m.group(1) + "return fragmentView;", t)
+              if n:
+                  wr(q, t2)
+                  ok("%s: пружинное открытие экрана" % nm)
+
+          al_path = SRC + "/org/telegram/messenger/ApplicationLoader.java"
+          al = rd(al_path)
+          if "FluxStyle.startup" in al:
+              ok("ApplicationLoader: FluxStyle.startup уже подключён")
+          else:
+              pat = re.compile(r'(public void onCreate\(\)\s*\{\n)')
+              if len(pat.findall(al)) != 1:
+                  warn("ApplicationLoader.java: onCreate не найден - радиус пузырей не применится при запуске")
+              else:
+                  hook = ("        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {\n"
+                          "            @Override\n"
+                          "            public void run() {\n"
+                          "                try {\n"
+                          "                    FluxStyle.startup();\n"
+                          "                } catch (Throwable t) {\n"
+                          "                    FileLog.e(t);\n"
+                          "                }\n"
+                          "            }\n"
+                          "        }, 2000);\n")
+                  wr(al_path, pat.sub(lambda m: m.group(1) + hook, al, count=1))
+                  ok("ApplicationLoader: FluxStyle.startup через 2 с после запуска")
+
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
+              f.write("## FluxGram: визуал и стиль\n```\n" + "\n".join(report) + "\n```\n")
           PY
 
       - name: Build APK
