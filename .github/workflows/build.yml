@@ -5685,7 +5685,7 @@ jobs:
       private static final String KEY_HASH = "fp_primary_hash";
       private static final String KEY_MANAGED = "fp_managed";
       private static final String KEY_STATUS = "fp_status";
-      private static final int MAX_ENTRIES = 200;
+      private static final int MAX_ENTRIES = 1000;
       private static final long BAD_STATE_MS = 20000L;
       private static final long ROTATE_GAP_MS = 30000L;
       private static final long TICK_MS = 5L * 60L * 1000L;
@@ -5847,19 +5847,20 @@ jobs:
          known = loadBaked();
         }
         list = known;
-        if (off && !known.isEmpty()) {
-         // сразу подключаем первый прокси, не дожидаясь сети
+        if (!known.isEmpty()) {
+         // добавляем весь список прокси в Telegram сразу (независимо от того, был ли прокси включён)
          for (int i = known.size() - 1; i >= 0; i--) {
           addInfo(known.get(i));
          }
-         apply(known.get(0));
-         setStatus("Подключён " + known.get(0).host + " (сохранённый список)");
+         if (off) {
+          apply(known.get(0));
+          setStatus("Подключён " + known.get(0).host + " (сохранённый список, " + known.size() + " прокси загружено)");
+         } else {
+          setStatus("Список прокси загружен: " + known.size() + " шт. (сохранённый список)");
+         }
         }
-        if (off) {
-         refresh(true);
-        } else {
-         poll();
-        }
+        // всегда запрашиваем свежий список с GitHub
+        refresh(true);
        }
        AndroidUtilities.runOnUIThread(TICK, TICK_MS);
       }
