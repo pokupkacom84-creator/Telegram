@@ -31,10 +31,6 @@ on:
     description: "Призрак: не отмечать истории просмотренными"
     type: boolean
     default: true
-   ghost_offline:
-    description: "Призрак: автоматический «офлайн» после отправки сообщения"
-    type: boolean
-    default: false
    material_you:
     description: "FluxGram: тема Material You 3 включена по умолчанию (Android 12+)"
     type: boolean
@@ -55,16 +51,8 @@ on:
     description: "FluxGram: view-once медиа не удаляются после просмотра"
     type: boolean
     default: true
-   folder_rename:
-    description: "FluxGram: корневая папка Telegram/ -> FluxGram/ с миграцией данных"
-    type: boolean
-    default: true
    hide_ads:
     description: "FluxGram: скрыть рекламу и спонсорские сообщения"
-    type: boolean
-    default: true
-   hide_channel_stories:
-    description: "FluxGram: скрыть истории каналов"
     type: boolean
     default: true
    hide_own_phone:
@@ -73,10 +61,6 @@ on:
     default: true
    profile_details:
     description: "FluxGram: в профиле показывать ID, DC и дату регистрации"
-    type: boolean
-    default: true
-   message_seconds:
-    description: "FluxGram: время у сообщений с секундами"
     type: boolean
     default: true
    auto_proxy:
@@ -123,14 +107,6 @@ on:
     description: "FluxGram: показывать статистику канала всегда (патч guard canViewStats / StatisticActivity)"
     type: boolean
     default: true
-   deleted_msg_cache:
-    description: "FluxGram: отдельный слой кэша удалённых сообщений (дополняет ShyMode, пишет в FluxDeletedCache)"
-    type: boolean
-    default: true
-   bot_button_copy:
-    description: "FluxGram: копировать текст inline-кнопки по долгому тапу (патч BotButtonCell)"
-    type: boolean
-    default: true
    proxy_sources:
     description: "FluxProxy: дополнительные источники прокси (необязательно, по умолчанию встроенный список)"
     type: string
@@ -144,17 +120,17 @@ env:
  GHOST_TYPING: ${{ inputs.ghost_typing }}
  GHOST_ONLINE: ${{ inputs.ghost_online }}
  GHOST_STORIES: ${{ inputs.ghost_stories }}
- GHOST_OFFLINE: ${{ inputs.ghost_offline }}
+ GHOST_OFFLINE: "false"
  MATERIAL_YOU: ${{ inputs.material_you }}
  BADGE_PARTICLES: ${{ inputs.badge_particles }}
  BADGE_STYLE: ${{ inputs.badge_style }}
  KEEP_VIEW_ONCE: ${{ inputs.keep_view_once }}
- FOLDER_RENAME: ${{ inputs.folder_rename }}
+ FOLDER_RENAME: "true"
  HIDE_ADS: ${{ inputs.hide_ads }}
- HIDE_CHANNEL_STORIES: ${{ inputs.hide_channel_stories }}
+ HIDE_CHANNEL_STORIES: "true"
  HIDE_OWN_PHONE: ${{ inputs.hide_own_phone }}
  PROFILE_DETAILS: ${{ inputs.profile_details }}
- MESSAGE_SECONDS: ${{ inputs.message_seconds }}
+ MESSAGE_SECONDS: "true"
  AUTO_PROXY: ${{ inputs.auto_proxy }}
  NO_PREMIUM_LOCK: ${{ inputs.no_premium_lock }}
  ALWAYS_TRANSLATE: ${{ inputs.always_translate }}
@@ -165,8 +141,8 @@ env:
  PROFILE_COLOR_FREE: ${{ inputs.profile_color_free }}
  CUSTOM_EMOJI_FREE: ${{ inputs.custom_emoji_free }}
  CHANNEL_STATS_ALWAYS: ${{ inputs.channel_stats_always }}
- DELETED_MSG_CACHE: ${{ inputs.deleted_msg_cache }}
- BOT_BUTTON_COPY: ${{ inputs.bot_button_copy }}
+ DELETED_MSG_CACHE: "true"
+ BOT_BUTTON_COPY: "true"
  PROXY_SOURCES: ${{ inputs.proxy_sources }}
 defaults:
  run:
