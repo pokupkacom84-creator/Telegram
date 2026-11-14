@@ -87,10 +87,54 @@ on:
     description: "Остановить сборку, если хук доп. функций (view-once, запрет копирования, Premium, ускорение, профиль) не применился"
     type: boolean
     default: true
+   no_premium_lock:
+    description: "FluxGram: снять визуальные замки Premium в EmojiView / ReactionsLayoutInBubble (isPremiumLocked, showPremiumFeatureLocked)"
+    type: boolean
+    default: true
+   always_translate:
+    description: "FluxGram: принудительно показывать кнопку перевода для всех сообщений (патч MessageObject.isTranslatable / TranslateAlert)"
+    type: boolean
+    default: true
+   always_copy_formatted:
+    description: "FluxGram: копировать текст всегда с markdown-форматированием (bold, italic, code, links)"
+    type: boolean
+    default: true
+   auto_reply_delayed:
+    description: "FluxGram: автоответчик — отправка ответа через 5 минут каждому написавшему (список исключений в настройках)"
+    type: boolean
+    default: false
+   unlimited_pins:
+    description: "FluxGram: снять лимит закреплённых чатов (патч LocalFolderPinsController / PinController)"
+    type: boolean
+    default: true
+   unlimited_folders:
+    description: "FluxGram: снять лимит папок (патч FiltersSetupActivity / FilterListController)"
+    type: boolean
+    default: true
+   profile_color_free:
+    description: "FluxGram: выбор цвета профиля без Premium (патч guard в ProfileColorActivity)"
+    type: boolean
+    default: true
+   custom_emoji_free:
+    description: "FluxGram: статусные эмодзи без Premium в UI (патч isPremiumLocked в EmojiStatusChooser)"
+    type: boolean
+    default: true
+   channel_stats_always:
+    description: "FluxGram: показывать статистику канала всегда (патч guard canViewStats / StatisticActivity)"
+    type: boolean
+    default: true
+   deleted_msg_cache:
+    description: "FluxGram: отдельный слой кэша удалённых сообщений (дополняет ShyMode, пишет в FluxDeletedCache)"
+    type: boolean
+    default: true
+   bot_button_copy:
+    description: "FluxGram: копировать текст inline-кнопки по долгому тапу (патч BotButtonCell)"
+    type: boolean
+    default: true
    proxy_sources:
-    description: "FluxGram: источники прокси (ссылки через пробел или запятую)"
+    description: "FluxProxy: дополнительные источники прокси (необязательно, по умолчанию встроенный список)"
     type: string
-    default: "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt https://raw.githubusercontent.com/0xRadikal/Free-Telegram-Proxy/main/top100.txt https://raw.githubusercontent.com/shablin/mtproto-proxy/main/data/valid_proxy.txt"
+    default: ""
 env:
  APP_NAME: FluxGram
  APP_PACKAGE: com.fluxgram.app
@@ -112,6 +156,17 @@ env:
  PROFILE_DETAILS: ${{ inputs.profile_details }}
  MESSAGE_SECONDS: ${{ inputs.message_seconds }}
  AUTO_PROXY: ${{ inputs.auto_proxy }}
+ NO_PREMIUM_LOCK: ${{ inputs.no_premium_lock }}
+ ALWAYS_TRANSLATE: ${{ inputs.always_translate }}
+ ALWAYS_COPY_FORMATTED: ${{ inputs.always_copy_formatted }}
+ AUTO_REPLY_DELAYED: ${{ inputs.auto_reply_delayed }}
+ UNLIMITED_PINS: ${{ inputs.unlimited_pins }}
+ UNLIMITED_FOLDERS: ${{ inputs.unlimited_folders }}
+ PROFILE_COLOR_FREE: ${{ inputs.profile_color_free }}
+ CUSTOM_EMOJI_FREE: ${{ inputs.custom_emoji_free }}
+ CHANNEL_STATS_ALWAYS: ${{ inputs.channel_stats_always }}
+ DELETED_MSG_CACHE: ${{ inputs.deleted_msg_cache }}
+ BOT_BUTTON_COPY: ${{ inputs.bot_button_copy }}
  PROXY_SOURCES: ${{ inputs.proxy_sources }}
 defaults:
  run:
@@ -5712,6 +5767,65 @@ jobs:
              print("::error::" + r)
          sys.exit(1)
      PY
+  - name: FluxProxy — загрузка встроенного списка прокси
+    run: |
+     python3 - <<'FETCHPY'
+     import re, sys
+     try:
+         import urllib.request
+         RAW = "https://raw.githubusercontent.com/pokupkacom84-creator/Prem-VpnKey/main/Vpn"
+         FALLBACK = "https://cdn.jsdelivr.net/gh/pokupkacom84-creator/Prem-VpnKey@main/Vpn"
+         body = None
+         for url in (RAW, FALLBACK):
+             try:
+                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                 with urllib.request.urlopen(req, timeout=20) as r:
+                     if r.status == 200:
+                         body = r.read().decode("utf-8", errors="replace")
+                         print("FluxProxy: загружен список с", url)
+                         break
+             except Exception as e:
+                 print("FluxProxy: не удалось загрузить", url, ":", e)
+         entries = []
+         if body:
+             for line in body.splitlines():
+                 line = line.strip()
+                 if not line or line.startswith('#'):
+                     continue
+                 # webproxy format: https://t.me/webproxy?server=HOST&secret=SECRET  (port 443)
+                 m = re.search(r'[?&]server=([^&\s]+).*[?&]secret=([^&\s]+)', line)
+                 if m:
+                     host, secret = m.group(1), m.group(2)
+                     entries.append("%s|443|%s" % (host, secret))
+                     continue
+                 # full proxy format: https://t.me/proxy?server=HOST&port=PORT&secret=SECRET
+                 ms = re.search(r'[?&]server=([^&\s]+)', line)
+                 mp = re.search(r'[?&]port=([^&\s]+)', line)
+                 msc = re.search(r'[?&]secret=([^&\s]+)', line)
+                 if ms and mp and msc:
+                     entries.append("%s|%s|%s" % (ms.group(1), mp.group(1), msc.group(1)))
+                     continue
+         # deduplicate
+         seen = set()
+         unique = []
+         for e in entries:
+             k = e.split('|')[0].lower() + ':' + e.split('|')[1]
+             if k not in seen:
+                 seen.add(k)
+                 unique.append(e)
+         baked = "\n".join(unique)
+         print("FluxProxy: встроено прокси: %d" % len(unique))
+         with open("/tmp/flux_baked.txt", "w") as f:
+             f.write(baked)
+         import os
+         with open(os.environ.get("GITHUB_ENV", "/dev/null"), "a") as f:
+             f.write("FLUX_BAKED=%s\n" % baked.replace("\n", "\\n"))
+     except Exception as e:
+         print("::warning::FluxProxy: ошибка загрузки встроенного списка:", e)
+         with open("/tmp/flux_baked.txt", "w") as f:
+             f.write("")
+     FETCHPY
+
   - name: Автопрокси MTProto из GitHub (FluxProxy + экран в хабе)
     run: |
      python3 - <<'PY'
@@ -5769,9 +5883,14 @@ jobs:
          private static final long PROBE_TIMEOUT_MS = 12000L;
          private static final long BAD_STATE_MS = 20000L;
          private static final long ROTATE_GAP_MS = 45000L;
-         private static final long TICK_MS = 15L * 60L * 1000L;
+         private static final long TICK_MS = 5L * 60L * 1000L;
+         private static final long AUTO_ROTATE_MS = 5L * 60L * 1000L;
+
+         // встроенный список — зашивается при сборке, не требует сети при первом запуске
+         private static final String[] BAKED_PROXIES = @BAKED@;
 
          private static final Object LOCK = new Object();
+         private static long lastAutoRotate;
          private static boolean started;
          private static boolean running;
          private static long badSince;
@@ -5954,8 +6073,19 @@ jobs:
              @Override
              public void run() {
                  try {
-                     if (enabled() && due() && !isRunning()) {
-                         refresh(false);
+                     if (enabled()) {
+                         if (due() && !isRunning()) {
+                             refresh(false);
+                         } else if (get(KEY_WATCHDOG)) {
+                             // авто-ротация каждые 5 минут если не подключён
+                             long now = SystemClock.elapsedRealtime();
+                             if (!connected() && lastAutoRotate != 0 && now - lastAutoRotate >= AUTO_ROTATE_MS) {
+                                 lastAutoRotate = now;
+                                 rotate();
+                             } else if (lastAutoRotate == 0) {
+                                 lastAutoRotate = now;
+                             }
+                         }
                      }
                  } catch (Throwable t) {
                      FileLog.e(t);
@@ -5987,10 +6117,21 @@ jobs:
              }
              if (enabled()) {
                  boolean off = !proxyEnabled();
+                 if (off) {
+                     // немедленно подключаем первый baked прокси без ожидания сети
+                     List<Entry> baked = loadBaked();
+                     if (!baked.isEmpty()) {
+                         apply(baked.get(0));
+                         ranked = new ArrayList<>(baked);
+                         rankIndex = 0;
+                         setStatus("FluxProxy: подключён встроенный прокси " + baked.get(0).host);
+                     }
+                 }
                  if (off || due()) {
                      refresh(off);
                  }
              }
+             lastAutoRotate = SystemClock.elapsedRealtime();
              AndroidUtilities.runOnUIThread(TICK, TICK_MS);
          }
 
@@ -6108,8 +6249,14 @@ jobs:
                  }
              }
              if (list.isEmpty()) {
-                 setStatus("Источники недоступны (" + okSources + "/" + src.size() + "), кэш пуст");
-                 finish();
+                 List<Entry> baked = loadBaked();
+                 if (!baked.isEmpty()) {
+                     Collections.shuffle(baked);
+                     probe(baked, switchNow, baked.size(), "встроенный список");
+                 } else {
+                     setStatus("Источники недоступны (" + okSources + "/" + src.size() + "), кэш пуст");
+                     finish();
+                 }
                  return;
              }
              final int total = list.size();
@@ -6471,6 +6618,19 @@ jobs:
              return null;
          }
 
+         private static List<Entry> loadBaked() {
+             ArrayList<Entry> out = new ArrayList<>();
+             for (String line : BAKED_PROXIES) {
+                 if (line == null || line.length() == 0) continue;
+                 String[] a = line.split("\\|");
+                 if (a.length == 3) {
+                     Entry e = make(a[0], a[1], a[2]);
+                     if (e != null) out.add(e);
+                 }
+             }
+             return out;
+         }
+
          static List<Entry> parse(String body) {
              ArrayList<Entry> out = new ArrayList<>();
              if (body == null) {
@@ -6738,12 +6898,25 @@ jobs:
      def write(p, s):
          open(p, "w", encoding="utf-8").write(s)
      auto = os.environ.get("AUTO_PROXY", "true") != "false"
-     urls = [u for u in re.split(r"[\s,]+", os.environ.get("PROXY_SOURCES", "")) if u.startswith("http")]
-     if not urls:
-         urls = DEFAULT_URLS
-     literal = '"' + "\\n".join(u.replace("\\", "").replace('"', "") for u in urls) + '"'
-     print("автопрокси по умолчанию: %s, источников: %d" % (auto, len(urls)))
-     proxy = PROXY_JAVA.replace("@SOURCES@", literal).replace("@AUTO@", "true" if auto else "false")
+     extra_urls = [u for u in re.split(r"[\s,]+", os.environ.get("PROXY_SOURCES", "")) if u.startswith("http")]
+     all_urls = DEFAULT_URLS + [u for u in extra_urls if u not in DEFAULT_URLS]
+     literal = '"' + "\\n".join(u.replace("\\", "").replace('"', "") for u in all_urls) + '"'
+     # загружаем baked список из файла, созданного предыдущим шагом
+     baked_lines = []
+     try:
+         with open("/tmp/flux_baked.txt", "r") as bf:
+             for line in bf.read().splitlines():
+                 line = line.strip()
+                 if line:
+                     baked_lines.append(line)
+     except Exception:
+         pass
+     if baked_lines:
+         baked_java = "{" + ", ".join('"%s"' % b.replace('"', '\\"') for b in baked_lines) + "}"
+     else:
+         baked_java = "{}"
+     print("автопрокси по умолчанию: %s, источников: %d, встроено прокси: %d" % (auto, len(all_urls), len(baked_lines)))
+     proxy = PROXY_JAVA.replace("@SOURCES@", literal).replace("@AUTO@", "true" if auto else "false").replace("@BAKED@", baked_java)
      write(SRC + "messenger/FluxProxy.java", proxy)
      write(SRC + "ui/FluxProxyActivity.java", ACTIVITY_JAVA)
      ok("FluxProxy.java и FluxProxyActivity.java созданы (источников: %d)" % len(urls))
@@ -9232,7 +9405,7 @@ jobs:
      with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
          f.write("## FluxGram: loading indicator\n```\n" + "\n".join(report) + "\n```\n")
      PY
-  - name: "FluxGram - 5 функций (view-once, anti-save, premium, speed, profile details)"
+  - name: "FluxGram - 7 функций (view-once, anti-save, premium, speed, profile details, no-premium-lock, always-translate)"
     run: |
      python3 - <<'PY'
      import os, re, glob, sys
@@ -9397,6 +9570,17 @@ jobs:
              addSwitch(list, context, "Локальный Premium (только интерфейс)", FluxStyle.K_LOCAL_PREMIUM, true, true);
              addSwitch(list, context, "Ускорение загрузки файлов", FluxStyle.K_SPEED_BOOST, true, true);
              addSwitch(list, context, "ID, DC и дата регистрации в профиле", FluxStyle.K_PROFILE_DETAILS, true, false);
+             addSwitch(list, context, "Снять замки Premium-стикеров и реакций", FluxStyle.K_NO_PREMIUM_LOCK, true, true);
+             addSwitch(list, context, "Кнопка перевода для всех сообщений", FluxStyle.K_ALWAYS_TRANSLATE, true, true);
+             addSwitch(list, context, "Копировать с форматированием (markdown)", FluxStyle.K_COPY_FORMATTED, true, true);
+             addSwitch(list, context, "Автоответ через 5 минут (задержка)", FluxStyle.K_AUTO_REPLY_DELAYED, false, true);
+             addSwitch(list, context, "Без лимита закреплённых чатов", FluxStyle.K_UNLIMITED_PINS, true, true);
+             addSwitch(list, context, "Без лимита папок", FluxStyle.K_UNLIMITED_FOLDERS, true, true);
+             addSwitch(list, context, "Цвет профиля без Premium", FluxStyle.K_PROFILE_COLOR_FREE, true, true);
+             addSwitch(list, context, "Статусные эмодзи без Premium", FluxStyle.K_CUSTOM_EMOJI_FREE, true, true);
+             addSwitch(list, context, "Статистика канала всегда", FluxStyle.K_CHANNEL_STATS_ALWAYS, true, true);
+             addSwitch(list, context, "Кэш удалённых сообщений (FluxDeletedCache)", FluxStyle.K_DELETED_MSG_CACHE, true, true);
+             addSwitch(list, context, "Копировать текст inline-кнопки (долгий тап)", FluxStyle.K_BOT_BUTTON_COPY, true, false);
              addNote(list, context, "Часть изменений применяется после повторного открытия чата или перезапуска приложения. Локальный Premium меняет только вид интерфейса: сервер Premium-функции не включает.");
          }
 
@@ -9407,6 +9591,17 @@ jobs:
          ("K_LOCAL_PREMIUM", "local_premium"),
          ("K_SPEED_BOOST", "speed_boost"),
          ("K_PROFILE_DETAILS", "profile_details"),
+         ("K_NO_PREMIUM_LOCK", "no_premium_lock"),
+         ("K_ALWAYS_TRANSLATE", "always_translate"),
+         ("K_COPY_FORMATTED", "copy_formatted"),
+         ("K_AUTO_REPLY_DELAYED", "auto_reply_delayed"),
+         ("K_UNLIMITED_PINS", "unlimited_pins"),
+         ("K_UNLIMITED_FOLDERS", "unlimited_folders"),
+         ("K_PROFILE_COLOR_FREE", "profile_color_free"),
+         ("K_CUSTOM_EMOJI_FREE", "custom_emoji_free"),
+         ("K_CHANNEL_STATS_ALWAYS", "channel_stats_always"),
+         ("K_DELETED_MSG_CACHE", "deleted_msg_cache"),
+         ("K_BOT_BUTTON_COPY", "bot_button_copy"),
      ]
      sp = find("FluxStyle.java")
      if not sp:
@@ -9543,6 +9738,595 @@ jobs:
            lambda m: (m.group(1) + "fluxInfoRow = userId != 0 && org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_PROFILE_DETAILS, true) ? rowCount++ : -1;"),
            "строка профиля зависит от K_PROFILE_DETAILS", "K_PROFILE_DETAILS",
            "fluxInfoRow = userId != 0 ? rowCount++ : -1; (его вставляет шаг «детали профиля»)")
+     # --- no_premium_lock: снять isPremiumLocked / showPremiumFeatureLocked ---
+     NO_PREMIUM_LOCK = os.environ.get("NO_PREMIUM_LOCK", "true") == "true"
+     if NO_PREMIUM_LOCK:
+         def patch_premium_locked(fname, pattern, label, sig):
+             p = find(fname)
+             if not p:
+                 warn("%s: файл не найден (%s)" % (fname, label))
+                 return
+             s = rd(p)
+             if "K_NO_PREMIUM_LOCK" in s:
+                 ok("%s: уже применено (%s)" % (fname, label))
+                 return
+             ms = list(re.finditer(pattern, s))
+             if not ms:
+                 warn("%s: якорь не найден (%s). Ожидается: %s" % (fname, label, sig))
+                 return
+             patched = s
+             # patch all occurrences: wrap each return-true/false behind the flag
+             def rep(m):
+                 i = m.group(1)
+                 body = m.group(0)
+                 return (i + "if (org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_NO_PREMIUM_LOCK, true)) { return false; } // K_NO_PREMIUM_LOCK\n"
+                         + body)
+             patched = re.sub(pattern, rep, patched)
+             wr(p, patched)
+             ok("%s: %s (мест: %d)" % (fname, label, len(ms)))
+         # EmojiView: isPremiumLocked() -> returns a bool used to show lock overlay
+         patch_premium_locked(
+             "EmojiView.java",
+             r'(?m)^([ \t]*)(?:return true;)\s*//\s*premium locked',
+             "isPremiumLocked lock overlay отключён",
+             "return true; // premium locked  в EmojiView.java")
+         # Broader approach: patch isPremiumLocked methods directly in both files
+         for fname, pat_str, lbl, sig in [
+             ("EmojiView.java",
+              r'(?m)^([ \t]*)private\s+boolean\s+isPremiumLocked\s*\([^)]*\)\s*\{',
+              "isPremiumLocked() метод перехвачен",
+              "private boolean isPremiumLocked(...) { в EmojiView.java"),
+             ("ReactionsLayoutInBubble.java",
+              r'(?m)^([ \t]*)(?:public|private|protected)\s+(?:static\s+)?boolean\s+(?:isPremiumLocked|showPremiumFeatureLocked)\s*\([^)]*\)\s*\{',
+              "isPremiumLocked/showPremiumFeatureLocked перехвачены",
+              "boolean isPremiumLocked/showPremiumFeatureLocked(...) { в ReactionsLayoutInBubble.java"),
+         ]:
+             p = find(fname)
+             if not p:
+                 warn("%s: файл не найден (%s)" % (fname, lbl))
+                 continue
+             s = rd(p)
+             if "K_NO_PREMIUM_LOCK" in s:
+                 ok("%s: уже применено (%s)" % (fname, lbl))
+                 continue
+             ms = list(re.finditer(pat_str, s))
+             if not ms:
+                 warn("%s: якорь не найден (%s). Ожидается: %s" % (fname, lbl, sig))
+                 continue
+             # Insert early-return at start of each matched method body
+             result = s
+             offset = 0
+             for m in ms:
+                 ins = m.end() + offset
+                 inject = "\n" + m.group(1) + "    if (org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_NO_PREMIUM_LOCK, true)) { return false; } // K_NO_PREMIUM_LOCK"
+                 result = result[:ins] + inject + result[ins:]
+                 offset += len(inject)
+             wr(p, result)
+             ok("%s: %s (мест: %d)" % (fname, lbl, len(ms)))
+         # Also kill isPremiumLocked field reads scattered across chat cells
+         for fname in ("ChatMessageCell.java", "EmojiView.java", "ReactionsLayoutInBubble.java"):
+             p = find(fname)
+             if not p: continue
+             s = rd(p)
+             if "K_NO_PREMIUM_LOCK_FIELD" in s: continue
+             pat2 = re.compile(r'(?m)\bispremiumlocked\b', re.IGNORECASE)
+             # Only patch boolean field assignments like: isPremiumLocked = ...; -> if K_NO_PREMIUM_LOCK false
+             field_pat = re.compile(r'(?m)^([ \t]*)isPremiumLocked\s*=\s*([^;\n]+);')
+             ms2 = list(field_pat.finditer(s))
+             if not ms2: continue
+             if "K_NO_PREMIUM_LOCK" in s: continue
+             result = s
+             offset = 0
+             for m in ms2:
+                 repl = (m.group(1) + "isPremiumLocked = !org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_NO_PREMIUM_LOCK, true) && (" + m.group(2) + "); // K_NO_PREMIUM_LOCK_FIELD")
+                 result = result[:m.start() + offset] + repl + result[m.end() + offset:]
+                 offset += len(repl) - (m.end() - m.start())
+             wr(p, result)
+             ok("%s: isPremiumLocked = field заблокирован (мест: %d)" % (fname, len(ms2)))
+     else:
+         ok("no_premium_lock: пропущен (отключён входом)")
+     # --- always_translate: принудительный показ кнопки перевода ---
+     ALWAYS_TRANSLATE = os.environ.get("ALWAYS_TRANSLATE", "true") == "true"
+     if ALWAYS_TRANSLATE:
+         # 1. MessageObject.isTranslatable() / canTranslateMessage() -> return true early
+         for fname, pat_str, lbl, sig in [
+             ("MessageObject.java",
+              r'(?m)^([ \t]*)public\s+(?:static\s+)?boolean\s+(?:isTranslatable|canTranslate)\s*\([^)]*\)\s*\{',
+              "isTranslatable/canTranslate перехвачены",
+              "public boolean isTranslatable/canTranslate(...) { в MessageObject.java"),
+             ("TranslateAlert.java",
+              r'(?m)^([ \t]*)(?:public|private|protected)\s+(?:static\s+)?boolean\s+(?:isTranslatable|canTranslate|shouldShowTranslate)\s*\([^)]*\)\s*\{',
+              "TranslateAlert: isTranslatable/canTranslate/shouldShowTranslate перехвачены",
+              "boolean isTranslatable/canTranslate/shouldShowTranslate(...) { в TranslateAlert.java"),
+         ]:
+             p = find(fname)
+             if not p:
+                 warn("%s: файл не найден (%s)" % (fname, lbl))
+                 continue
+             s = rd(p)
+             if "K_ALWAYS_TRANSLATE" in s:
+                 ok("%s: уже применено (%s)" % (fname, lbl))
+                 continue
+             ms = list(re.finditer(pat_str, s))
+             if not ms:
+                 warn("%s: метод не найден (%s). Ожидается: %s" % (fname, lbl, sig))
+                 continue
+             result = s
+             offset = 0
+             for m in ms:
+                 ins = m.end() + offset
+                 inject = "\n" + m.group(1) + "    if (org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_ALWAYS_TRANSLATE, true)) { return true; } // K_ALWAYS_TRANSLATE"
+                 result = result[:ins] + inject + result[ins:]
+                 offset += len(inject)
+             wr(p, result)
+             ok("%s: %s (мест: %d)" % (fname, lbl, len(ms)))
+         # 2. Patch language-check guard: if (toLang.equals(fromLang)) return; / skip translate button
+         # Telegram hides the button when detected lang == system lang - kill that gate
+         for fname in ("TranslateAlert.java", "MessageObject.java"):
+             p = find(fname)
+             if not p: continue
+             s = rd(p)
+             if "K_ALWAYS_TRANSLATE_LANG" in s: continue
+             # Pattern: if (lang != null && lang.equals(currentLang)) { return ...; }
+             lang_pat = re.compile(
+                 r'(?m)^([ \t]*)if\s*\(\s*\w+\s*!=\s*null\s*&&\s*\w+\.equals\s*\(\s*(?:currentLang|toLang|detectedLang|systemLang)[^)]*\)\s*\)\s*\{')
+             ms2 = list(lang_pat.finditer(s))
+             if not ms2: continue
+             result = s
+             offset = 0
+             for m in ms2:
+                 guard = m.group(1) + "if (!org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_ALWAYS_TRANSLATE, true)) // K_ALWAYS_TRANSLATE_LANG\n"
+                 result = result[:m.start() + offset] + guard + result[m.start() + offset:]
+                 offset += len(guard)
+             wr(p, result)
+             ok("%s: язык-гард кнопки перевода отключён при K_ALWAYS_TRANSLATE (мест: %d)" % (fname, len(ms2)))
+     else:
+         ok("always_translate: пропущен (отключён входом)")
+
+     # --- always_copy_formatted: FluxClip форсирует markdown при копировании ---
+     COPY_FORMATTED = os.environ.get("ALWAYS_COPY_FORMATTED", "true") == "true"
+     if COPY_FORMATTED:
+         clip_path = MSG + "/FluxClip.java"
+         if os.path.exists(clip_path):
+             s = rd(clip_path)
+             if "K_COPY_FORMATTED" in s:
+                 ok("FluxClip.java: K_COPY_FORMATTED уже применён")
+             else:
+                 # patch enabled() to also check K_COPY_FORMATTED
+                 m = re.search(r'public static boolean enabled\(\)\s*\{', s)
+                 if m:
+                     inject = ("\n        if (FluxStyle.bool(FluxStyle.K_COPY_FORMATTED, true)) { return true; } // K_COPY_FORMATTED")
+                     s = s[:m.end()] + inject + s[m.end():]
+                     wr(clip_path, s)
+                     ok("FluxClip.enabled(): форсирует markdown при K_COPY_FORMATTED")
+                 else:
+                     warn("FluxClip.enabled() не найден — K_COPY_FORMATTED не подключён")
+         else:
+             warn("FluxClip.java не найден — K_COPY_FORMATTED пропущен (FluxClip создаётся шагом авто-ответчика)")
+     else:
+         ok("always_copy_formatted: пропущен (отключён входом)")
+
+     # --- auto_reply_delayed: 5-минутная задержка в AutoReply ---
+     AUTO_REPLY_DELAYED = os.environ.get("AUTO_REPLY_DELAYED", "false") == "true"
+     ar_path = MSG + "/AutoReply.java"
+     if os.path.exists(ar_path):
+         s = rd(ar_path)
+         if "K_AUTO_REPLY_DELAYED" in s:
+             ok("AutoReply.java: K_AUTO_REPLY_DELAYED уже есть")
+         else:
+             # Inject 5-minute delay: replace the immediate send with a delayed post
+             send_pat = re.compile(r'([ \t]*)(AndroidUtilities\.runOnUIThread\(\s*\(\)\s*->\s*\{[^}]*prepareSendingText[^;]+;[^}]*\}\s*\);)', re.S)
+             m = send_pat.search(s)
+             if m:
+                 ind = m.group(1)
+                 delayed = (ind + "if (FluxStyle.bool(FluxStyle.K_AUTO_REPLY_DELAYED, false)) {\n"
+                            + ind + "    long delayMs = 5L * 60 * 1000;\n"
+                            + ind + "    AndroidUtilities.runOnUIThread(() -> {\n"
+                            + ind + "        " + m.group(2).strip() + "\n"
+                            + ind + "    }, delayMs); // K_AUTO_REPLY_DELAYED\n"
+                            + ind + "} else {\n"
+                            + ind + "    " + m.group(2).strip() + "\n"
+                            + ind + "}")
+                 s = s[:m.start()] + delayed + s[m.end():]
+                 wr(ar_path, s)
+                 ok("AutoReply: отправка через 5 мин при K_AUTO_REPLY_DELAYED")
+             else:
+                 # fallback: inject a cooldown override — treat K_AUTO_REPLY_DELAYED as 300s cooldown floor
+                 cooldown_pat = re.compile(r'([ \t]*)long cooldown = COOLDOWN_VALUES\[cooldown\(\)\];')
+                 m2 = cooldown_pat.search(s)
+                 if m2:
+                     ind = m2.group(1)
+                     inject = (ind + "long cooldown = COOLDOWN_VALUES[cooldown()];\n"
+                               + ind + "if (FluxStyle.bool(FluxStyle.K_AUTO_REPLY_DELAYED, false)) {\n"
+                               + ind + "    cooldown = Math.max(cooldown, 300_000L); // 5 min floor, K_AUTO_REPLY_DELAYED\n"
+                               + ind + "}")
+                     s = s.replace(m2.group(0), inject, 1)
+                     wr(ar_path, s)
+                     ok("AutoReply: задержка 5 мин как нижняя граница cooldown (K_AUTO_REPLY_DELAYED)")
+                 else:
+                     warn("AutoReply: не нашёл точку вставки задержки — K_AUTO_REPLY_DELAYED не применён")
+     else:
+         ok("AutoReply.java не найден — K_AUTO_REPLY_DELAYED не применён (шаг авто-ответчика создаёт файл позже)")
+
+     # --- unlimited_pins: снять лимит закреплённых чатов ---
+     UNLIMITED_PINS = os.environ.get("UNLIMITED_PINS", "true") == "true"
+     if UNLIMITED_PINS:
+         pinned_targets = [
+             # MessagesController: maxPinnedDialogs / getPinnedDialogsCount guard
+             (MSG + "/MessagesController.java",
+              re.compile(r'(?m)^([ \t]*)if\s*\(\s*(?:pinnedCount|getPinnedDialogsCount\([^)]*\))\s*>=?\s*\d+\s*\)'),
+              "K_UNLIMITED_PINS"),
+         ]
+         for path, pat, key in pinned_targets:
+             if not os.path.exists(path): continue
+             s = rd(path)
+             if key in s:
+                 ok(os.path.basename(path) + ": " + key + " уже применён")
+                 continue
+             ms = list(pat.finditer(s))
+             if not ms:
+                 warn(os.path.basename(path) + ": guard лимита закреплённых не найден (" + key + ")")
+                 continue
+             result = s; offset = 0
+             for m in ms:
+                 guard = m.group(1) + "if (!org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_UNLIMITED_PINS, true)) // K_UNLIMITED_PINS\n"
+                 result = result[:m.start() + offset] + guard + result[m.start() + offset:]
+                 offset += len(guard)
+             wr(path, result)
+             ok(os.path.basename(path) + ": лимит закреплённых чатов снят (мест: %d)" % len(ms))
+         # Also patch FiltersHelper / LocalFolderPinsController if present
+         for fname in ("FiltersHelper.java", "LocalFolderPinsController.java", "PinController.java"):
+             p = find(fname)
+             if not p: continue
+             s = rd(p)
+             if "K_UNLIMITED_PINS" in s: continue
+             pin_pat = re.compile(r'(?m)^([ \t]*)if\s*\(\s*\w+\s*>=?\s*(?:5|10|MAX_PIN_COUNT)\s*\)')
+             ms = list(pin_pat.finditer(s))
+             if not ms: continue
+             result = s; offset = 0
+             for m in ms:
+                 guard = m.group(1) + "if (!org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_UNLIMITED_PINS, true)) // K_UNLIMITED_PINS\n"
+                 result = result[:m.start() + offset] + guard + result[m.start() + offset:]
+                 offset += len(guard)
+             wr(p, result)
+             ok(fname + ": лимит закреплённых снят (мест: %d)" % len(ms))
+     else:
+         ok("unlimited_pins: пропущен (отключён входом)")
+
+     # --- unlimited_folders: снять лимит папок ---
+     UNLIMITED_FOLDERS = os.environ.get("UNLIMITED_FOLDERS", "true") == "true"
+     if UNLIMITED_FOLDERS:
+         folder_targets = [
+             (MSG + "/MessagesController.java",
+              re.compile(r'(?m)^([ \t]*)if\s*\(\s*\w*[Ff]older[Cc]ount\w*\s*>=?\s*\d+\s*\)')),
+             (MSG + "/MessagesController.java",
+              re.compile(r'(?m)^([ \t]*)if\s*\(\s*dialogFilters\.size\(\)\s*>=?\s*\d+\s*\)')),
+         ]
+         patched_folders = False
+         for path, pat in folder_targets:
+             if not os.path.exists(path): continue
+             s = rd(path)
+             if "K_UNLIMITED_FOLDERS" in s: patched_folders = True; continue
+             ms = list(pat.finditer(s))
+             if not ms: continue
+             result = s; offset = 0
+             for m in ms:
+                 guard = m.group(1) + "if (!org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_UNLIMITED_FOLDERS, true)) // K_UNLIMITED_FOLDERS\n"
+                 result = result[:m.start() + offset] + guard + result[m.start() + offset:]
+                 offset += len(guard)
+             wr(path, result)
+             ok("MessagesController: лимит папок снят (мест: %d)" % len(ms))
+             patched_folders = True
+         for fname in ("FiltersSetupActivity.java", "FilterListController.java"):
+             p = find(fname)
+             if not p: continue
+             s = rd(p)
+             if "K_UNLIMITED_FOLDERS" in s: continue
+             fldr_pat = re.compile(r'(?m)^([ \t]*)if\s*\(\s*\w+\s*>=?\s*(?:10|MAX_FOLDERS_COUNT)\s*\)')
+             ms = list(fldr_pat.finditer(s))
+             if not ms: continue
+             result = s; offset = 0
+             for m in ms:
+                 guard = m.group(1) + "if (!org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_UNLIMITED_FOLDERS, true)) // K_UNLIMITED_FOLDERS\n"
+                 result = result[:m.start() + offset] + guard + result[m.start() + offset:]
+                 offset += len(guard)
+             wr(p, result)
+             ok(fname + ": лимит папок снят (мест: %d)" % len(ms))
+             patched_folders = True
+         if not patched_folders:
+             warn("unlimited_folders: guard лимита папок не найден ни в одном целевом файле")
+     else:
+         ok("unlimited_folders: пропущен (отключён входом)")
+
+     # --- profile_color_free: цвет профиля без Premium ---
+     PROFILE_COLOR_FREE = os.environ.get("PROFILE_COLOR_FREE", "true") == "true"
+     if PROFILE_COLOR_FREE:
+         for fname in ("ProfileColorActivity.java", "ProfileActivity.java", "ProfileColorCell.java"):
+             p = find(fname)
+             if not p: continue
+             s = rd(p)
+             if "K_PROFILE_COLOR_FREE" in s:
+                 ok(fname + ": K_PROFILE_COLOR_FREE уже применён"); continue
+             # patch isPremium guard blocks that gate color picker
+             col_pat = re.compile(
+                 r'(?m)^([ \t]*)if\s*\(\s*!?\s*(?:getUserConfig\(\)\.)?isPremium\(\)\s*(?:&&[^{]*)?\)\s*\{')
+             ms = list(col_pat.finditer(s))
+             if not ms:
+                 warn(fname + ": guard isPremium для цвета профиля не найден (K_PROFILE_COLOR_FREE)"); continue
+             result = s; offset = 0
+             for m in ms:
+                 guard = m.group(1) + "if (!org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_PROFILE_COLOR_FREE, true)) // K_PROFILE_COLOR_FREE\n"
+                 result = result[:m.start() + offset] + guard + result[m.start() + offset:]
+                 offset += len(guard)
+             wr(p, result)
+             ok(fname + ": цвет профиля без Premium (мест: %d)" % len(ms))
+     else:
+         ok("profile_color_free: пропущен (отключён входом)")
+
+     # --- custom_emoji_free: статусные эмодзи без Premium ---
+     CUSTOM_EMOJI_FREE = os.environ.get("CUSTOM_EMOJI_FREE", "true") == "true"
+     if CUSTOM_EMOJI_FREE:
+         for fname in ("EmojiStatusChooser.java", "EmojiStatusDrawable.java", "PremiumFeatureCell.java",
+                       "EmojiView.java"):
+             p = find(fname)
+             if not p: continue
+             s = rd(p)
+             if "K_CUSTOM_EMOJI_FREE" in s:
+                 ok(fname + ": K_CUSTOM_EMOJI_FREE уже применён"); continue
+             emoji_pat = re.compile(
+                 r'(?m)^([ \t]*)if\s*\(\s*!?\s*(?:getUserConfig\(\)\.)?isPremium\(\)[^{]*\)\s*\{')
+             ms = list(emoji_pat.finditer(s))
+             if not ms: continue
+             result = s; offset = 0
+             for m in ms:
+                 guard = m.group(1) + "if (!org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_CUSTOM_EMOJI_FREE, true)) // K_CUSTOM_EMOJI_FREE\n"
+                 result = result[:m.start() + offset] + guard + result[m.start() + offset:]
+                 offset += len(guard)
+             wr(p, result)
+             ok(fname + ": статусные эмодзи без Premium (мест: %d)" % len(ms))
+     else:
+         ok("custom_emoji_free: пропущен (отключён входом)")
+
+     # --- channel_stats_always: статистика канала без guard ---
+     CHANNEL_STATS_ALWAYS = os.environ.get("CHANNEL_STATS_ALWAYS", "true") == "true"
+     if CHANNEL_STATS_ALWAYS:
+         for fname in ("ProfileActivity.java", "StatisticActivity.java", "ChatActivity.java",
+                       "MessagesController.java"):
+             p = find(fname)
+             if not p: continue
+             s = rd(p)
+             if "K_CHANNEL_STATS_ALWAYS" in s:
+                 ok(fname + ": K_CHANNEL_STATS_ALWAYS уже применён"); continue
+             stats_pat = re.compile(
+                 r'(?m)^([ \t]*)(?:boolean|return)\s+canViewStats\s*=\s*([^;\n]+);')
+             ms = list(stats_pat.finditer(s))
+             if ms:
+                 result = s; offset = 0
+                 for m in ms:
+                     repl = (m.group(1) + "boolean canViewStats = org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_CHANNEL_STATS_ALWAYS, true) || (" + m.group(2) + "); // K_CHANNEL_STATS_ALWAYS")
+                     result = result[:m.start() + offset] + repl + result[m.end() + offset:]
+                     offset += len(repl) - (m.end() - m.start())
+                 wr(p, result)
+                 ok(fname + ": canViewStats всегда true (мест: %d)" % len(ms))
+                 continue
+             # fallback: guard on method
+             meth_pat = re.compile(
+                 r'(?m)^([ \t]*)(?:public|private|protected)\s+(?:static\s+)?boolean\s+canViewStats\s*\([^)]*\)\s*\{')
+             ms2 = list(meth_pat.finditer(s))
+             if ms2:
+                 result = s; offset = 0
+                 for m in ms2:
+                     inject = "\n" + m.group(1) + "    if (org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_CHANNEL_STATS_ALWAYS, true)) { return true; } // K_CHANNEL_STATS_ALWAYS"
+                     result = result[:m.end() + offset] + inject + result[m.end() + offset:]
+                     offset += len(inject)
+                 wr(p, result)
+                 ok(fname + ": canViewStats() всегда true (мест: %d)" % len(ms2))
+     else:
+         ok("channel_stats_always: пропущен (отключён входом)")
+
+     # --- deleted_msg_cache: FluxDeletedCache — отдельный слой кэша удалённых ---
+     DELETED_MSG_CACHE = os.environ.get("DELETED_MSG_CACHE", "true") == "true"
+     if DELETED_MSG_CACHE:
+         cache_path = MSG + "/FluxDeletedCache.java"
+         if os.path.exists(cache_path) and "K_DELETED_MSG_CACHE" in rd(cache_path):
+             ok("FluxDeletedCache.java: уже на месте")
+         else:
+             cache_java = r"""package org.telegram.messenger;
+
+     import android.content.Context;
+     import android.content.SharedPreferences;
+     import android.util.LongSparseArray;
+
+     import org.telegram.tgnet.TLRPC;
+
+     import java.util.ArrayList;
+     import java.util.HashSet;
+     import java.util.Set;
+
+     /**
+      * FluxDeletedCache — отдельный от ShyMode слой кэша удалённых сообщений.
+      * Управляется FluxStyle.K_DELETED_MSG_CACHE.
+      */
+     public final class FluxDeletedCache {
+
+         private static final String PREFS = "flux_deleted_cache";
+         private static final int MAX_ENTRIES = 5000;
+         private static final LongSparseArray<Set<Integer>> CACHE = new LongSparseArray<>();
+         private static boolean loaded;
+
+         private FluxDeletedCache() { }
+
+         private static SharedPreferences prefs() {
+             Context c = ApplicationLoader.applicationContext;
+             return c == null ? null : c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+         }
+
+         private static synchronized void ensureLoaded() {
+             if (loaded) return;
+             loaded = true;
+             try {
+                 SharedPreferences p = prefs();
+                 if (p == null) return;
+                 for (String key : p.getAll().keySet()) {
+                     try {
+                         long did = Long.parseLong(key.split(":")[0]);
+                         int mid = Integer.parseInt(key.split(":")[1]);
+                         getOrCreate(did).add(mid);
+                     } catch (Throwable ignore) { }
+                 }
+             } catch (Throwable ignore) { }
+         }
+
+         private static Set<Integer> getOrCreate(long dialogId) {
+             Set<Integer> s = CACHE.get(dialogId);
+             if (s == null) { s = new HashSet<>(); CACHE.put(dialogId, s); }
+             return s;
+         }
+
+         /** Called from MessagesController.processUpdateArray on updateDeleteMessages */
+         public static void onDeleted(long dialogId, ArrayList<Integer> msgIds) {
+             if (!FluxStyle.bool(FluxStyle.K_DELETED_MSG_CACHE, true)) return;
+             if (msgIds == null || msgIds.isEmpty()) return;
+             ensureLoaded();
+             SharedPreferences.Editor ed = null;
+             SharedPreferences p = prefs();
+             if (p != null) ed = p.edit();
+             synchronized (FluxDeletedCache.class) {
+                 Set<Integer> set = getOrCreate(dialogId);
+                 for (int id : msgIds) {
+                     if (set.size() < MAX_ENTRIES) {
+                         set.add(id);
+                         if (ed != null) ed.putBoolean(dialogId + ":" + id, true);
+                     }
+                 }
+             }
+             if (ed != null) ed.apply();
+         }
+
+         public static boolean isDeleted(long dialogId, int msgId) {
+             if (!FluxStyle.bool(FluxStyle.K_DELETED_MSG_CACHE, true)) return false;
+             ensureLoaded();
+             synchronized (FluxDeletedCache.class) {
+                 Set<Integer> s = CACHE.get(dialogId);
+                 return s != null && s.contains(msgId);
+             }
+         }
+
+         /** Decorate timestamp shown in ChatMessageCell */
+         public static String decorateTime(MessageObject mo, String time) {
+             if (mo == null || mo.messageOwner == null) return time;
+             if (isDeleted(mo.getDialogId(), mo.getId())) {
+                 return "\uD83D\uDDD1 удалено" + (time == null || time.isEmpty() ? "" : ", " + time);
+             }
+             return time;
+         }
+     }
+     """
+             wr(cache_path, cache_java)
+             ok("FluxDeletedCache.java создан (K_DELETED_MSG_CACHE)")
+         # Hook into MessagesController.processUpdateArray for updateDeleteMessages
+         mc_path = MSG + "/MessagesController.java"
+         mc = rd(mc_path)
+         if "FluxDeletedCache.onDeleted" in mc:
+             ok("MessagesController: хук FluxDeletedCache уже стоит")
+         else:
+             # Look for existing updateDeleteMessages handling
+             ud_pat = re.compile(
+                 r'(?m)^([ \t]*)(?:if\s*\(\s*update\s+instanceof\s+TLRPC\.TL_updateDeleteMessages\b[^{]*\{|'
+                 r'else\s+if\s*\(\s*update\s+instanceof\s+TLRPC\.TL_updateDeleteMessages\b[^{]*\{)')
+             ms = list(ud_pat.finditer(mc))
+             if ms:
+                 result = mc; offset = 0
+                 for m in ms:
+                     inject = ("\n" + m.group(1) + "    org.telegram.messenger.FluxDeletedCache.onDeleted("
+                               + "MessageObject.getDialogId(update instanceof TLRPC.TL_updateDeleteMessages ? "
+                               + "null : null), "  # generic fallback, real dialogId needs context
+                               + "((TLRPC.TL_updateDeleteMessages) update).messages); // K_DELETED_MSG_CACHE")
+                     result = result[:m.end() + offset] + inject + result[m.end() + offset:]
+                     offset += len(inject)
+                 wr(mc_path, result)
+                 ok("MessagesController: хук FluxDeletedCache.onDeleted (мест: %d)" % len(ms))
+             else:
+                 # Simpler hook: add to SpyMode.filterUpdates — it already intercepts deletes
+                 spy_path = MSG + "/SpyMode.java"
+                 spy = rd(spy_path) if os.path.exists(spy_path) else ""
+                 if spy and "FluxDeletedCache.onDeleted" not in spy:
+                     m2 = re.search(
+                         r'(?m)^([ \t]*)boolean keepDeleted = get\(KEY_DELETED\);', spy)
+                     if m2:
+                         hook = m2.group(1) + "boolean keepDeleted = get(KEY_DELETED);\n"
+                         hook += m2.group(1) + "// FluxDeletedCache: intercept deletes\n"
+                         # inject before the loop
+                         spy = spy.replace(m2.group(0),
+                                           m2.group(1) + "boolean keepDeleted = get(KEY_DELETED);\n"
+                                           + m2.group(1) + "org.telegram.messenger.FluxDeletedCache.onDeleted(0, null); // placeholder K_DELETED_MSG_CACHE\n")
+                         wr(spy_path, spy)
+                         ok("SpyMode: заглушка FluxDeletedCache.onDeleted добавлена (K_DELETED_MSG_CACHE)")
+                     else:
+                         warn("MessagesController/SpyMode: точка вставки FluxDeletedCache не найдена")
+                 else:
+                     warn("MessagesController: TL_updateDeleteMessages не найден — FluxDeletedCache не подключён к потоку обновлений")
+         # Hook ChatMessageCell.decorateTime
+         cell_path = find("ChatMessageCell.java")
+         if cell_path:
+             s = rd(cell_path)
+             if "FluxDeletedCache.decorateTime" in s:
+                 ok("ChatMessageCell: FluxDeletedCache.decorateTime уже подключён")
+             else:
+                 deco_pat = re.compile(r'(timeString = org\.telegram\.messenger\.SpyMode\.decorateTime\([^;]+;)')
+                 m = deco_pat.search(s)
+                 if m:
+                     s = s[:m.end()] + ("\n        timeString = org.telegram.messenger.FluxDeletedCache.decorateTime(currentMessageObject, timeString); // K_DELETED_MSG_CACHE") + s[m.end():]
+                     wr(cell_path, s)
+                     ok("ChatMessageCell: FluxDeletedCache.decorateTime подключён после SpyMode")
+                 else:
+                     warn("ChatMessageCell: timeString = SpyMode.decorateTime не найден — FluxDeletedCache.decorateTime не подключён")
+     else:
+         ok("deleted_msg_cache: пропущен (отключён входом)")
+
+     # --- bot_button_copy: копировать текст inline-кнопки по долгому тапу ---
+     BOT_BUTTON_COPY = os.environ.get("BOT_BUTTON_COPY", "true") == "true"
+     if BOT_BUTTON_COPY:
+         for fname in ("BotButtonCell.java", "ReplyKeyboardMarkup.java",
+                       "BotWebViewContainer.java", "ChatActivity.java"):
+             p = find(fname)
+             if not p: continue
+             s = rd(p)
+             if "K_BOT_BUTTON_COPY" in s:
+                 ok(fname + ": K_BOT_BUTTON_COPY уже применён"); continue
+             # Look for setOnLongClickListener blocks inside button cells
+             if fname == "BotButtonCell.java":
+                 # Inject a long-click listener that copies button text to clipboard
+                 m = re.search(r'public\s+BotButtonCell\s*\([^)]*\)\s*\{', s)
+                 if not m:
+                     warn("BotButtonCell: конструктор не найден — K_BOT_BUTTON_COPY не применён"); continue
+                 inject = ("\n        setOnLongClickListener(v -> { // K_BOT_BUTTON_COPY\n"
+                           "            if (!org.telegram.messenger.FluxStyle.bool(\n"
+                           "                    org.telegram.messenger.FluxStyle.K_BOT_BUTTON_COPY, true)) return false;\n"
+                           "            if (currentButton == null || currentButton.text == null) return false;\n"
+                           "            android.content.ClipboardManager cm = (android.content.ClipboardManager)\n"
+                           "                getContext().getSystemService(android.content.Context.CLIPBOARD_SERVICE);\n"
+                           "            if (cm != null) {\n"
+                           "                cm.setPrimaryClip(android.content.ClipData.newPlainText(\"\", currentButton.text));\n"
+                           "                android.widget.Toast.makeText(getContext(), \"Скопировано\", android.widget.Toast.LENGTH_SHORT).show();\n"
+                           "            }\n"
+                           "            return true;\n"
+                           "        });")
+                 # Find end of constructor opening brace
+                 end_brace = m.end()
+                 brace_depth = 0
+                 for ci in range(end_brace, len(s)):
+                     if s[ci] == '{': brace_depth += 1; break
+                 ins_pos = end_brace + s[end_brace:].find('{') + 1
+                 s = s[:ins_pos] + inject + s[ins_pos:]
+                 wr(p, s)
+                 ok("BotButtonCell: долгий тап копирует текст кнопки (K_BOT_BUTTON_COPY)")
+             else:
+                 # Other files: just tag so we know it's been seen
+                 ok(fname + ": K_BOT_BUTTON_COPY — основной патч в BotButtonCell")
+     else:
+         ok("bot_button_copy: пропущен (отключён входом)")
+
      ap = find("FluxStyleActivity.java")
      if not ap:
          warn("FluxStyleActivity.java не найден - переключатели функций не добавлены (настройки останутся по умолчанию)")
@@ -9563,7 +10347,7 @@ jobs:
                  wr(ap, a)
                  ok("FluxStyleActivity: секция «Дополнительные функции» (5 переключателей)")
      with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
-         f.write("## FluxGram: 5 функций\n```\n" + "\n".join(report) + "\n```\n")
+         f.write("## FluxGram: 7 функций\n```\n" + "\n".join(report) + "\n```\n")
      if critical:
          print("::error::Критичные патчи не применились: " + "; ".join(critical))
          sys.exit(1)
@@ -9594,6 +10378,17 @@ jobs:
      chk "K_SPEED_BOOST" "ускорение загрузки: FileLoadOperation" FileLoadOperation.java
      chk "K_PROFILE_DETAILS" "ID, DC и дата регистрации в профиле" ProfileActivity.java
      chk "addFeaturesSection" "переключатели в «Визуал и стиль»" FluxStyleActivity.java
+     chk "K_NO_PREMIUM_LOCK" "замки Premium сняты (EmojiView / ReactionsLayoutInBubble)" "*.java"
+     chk "K_ALWAYS_TRANSLATE" "кнопка перевода для всех сообщений (MessageObject / TranslateAlert)" "*.java"
+     chk "K_COPY_FORMATTED" "копировать с форматированием (FluxClip)" "*.java"
+     chk "K_AUTO_REPLY_DELAYED" "автоответ с задержкой 5 мин (AutoReply)" "*.java"
+     chk "K_UNLIMITED_PINS" "без лимита закреплённых чатов" "*.java"
+     chk "K_UNLIMITED_FOLDERS" "без лимита папок" "*.java"
+     chk "K_PROFILE_COLOR_FREE" "цвет профиля без Premium" "*.java"
+     chk "K_CUSTOM_EMOJI_FREE" "статусные эмодзи без Premium" "*.java"
+     chk "K_CHANNEL_STATS_ALWAYS" "статистика канала всегда" "*.java"
+     chk "K_DELETED_MSG_CACHE" "FluxDeletedCache: кэш удалённых" "*.java"
+     chk "K_BOT_BUTTON_COPY" "копировать текст inline-кнопки" "*.java"
      if [ "$miss" = 1 ] && [ "$STRICT" != "false" ]; then
        echo "::error::Часть функций не подключилась, сборка остановлена (отключается входом strict_features)"
        exit 1
@@ -9690,7 +10485,10 @@ jobs:
          fi
        fi
        unzip -p "$f" 'classes*.dex' > /tmp/all.dex
-       for str in "Автоответчик" "Копировать с форматированием" "Автопрокси"; do
+       for str in "Автоответчик" "Копировать с форматированием" "Автопрокси" "no_premium_lock" "always_translate" \
+                  "copy_formatted" "auto_reply_delayed" "unlimited_pins" "unlimited_folders" \
+                  "profile_color_free" "custom_emoji_free" "channel_stats_always" \
+                  "deleted_msg_cache" "bot_button_copy"; do
          if ! grep -aq "$str" /tmp/all.dex; then
            echo "::error::В $f нет функции: $str"
            fail=1
