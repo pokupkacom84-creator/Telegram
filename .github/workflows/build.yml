@@ -107,10 +107,6 @@ on:
     description: "FluxGram: показывать статистику канала всегда (патч guard canViewStats / StatisticActivity)"
     type: boolean
     default: true
-   proxy_sources:
-    description: "FluxProxy: резервные публичные источники (нужны, только если ни один прокси из списка Prem-VpnKey не ответил; необязательно)"
-    type: string
-    default: ""
 env:
  APP_NAME: FluxGram
  APP_PACKAGE: com.fluxgram.app
@@ -143,7 +139,6 @@ env:
  CHANNEL_STATS_ALWAYS: ${{ inputs.channel_stats_always }}
  DELETED_MSG_CACHE: "true"
  BOT_BUTTON_COPY: "true"
- PROXY_SOURCES: ${{ inputs.proxy_sources }}
  PRIMARY_PROXY_URL: "https://raw.githubusercontent.com/pokupkacom84-creator/Prem-VpnKey/main/Vpn"
 defaults:
  run:
@@ -5664,1104 +5659,593 @@ jobs:
   - name: Автопрокси MTProto из GitHub (FluxProxy + экран в хабе)
     run: |
      python3 - <<'PY'
-     DEFAULT_URLS = ['https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt', 'https://raw.githubusercontent.com/0xRadikal/Free-Telegram-Proxy/main/top100.txt', 'https://raw.githubusercontent.com/shablin/mtproto-proxy/main/data/valid_proxy.txt']
      PROXY_JAVA = r"""package org.telegram.messenger;
      import android.content.Context;
      import android.content.SharedPreferences;
      import android.net.Uri;
      import android.os.SystemClock;
-     import org.json.JSONArray;
-     import org.json.JSONObject;
      import org.telegram.tgnet.ConnectionsManager;
      import java.io.ByteArrayOutputStream;
      import java.io.InputStream;
      import java.lang.reflect.Field;
-     import java.lang.reflect.InvocationHandler;
      import java.lang.reflect.Method;
-     import java.lang.reflect.Proxy;
      import java.net.HttpURLConnection;
      import java.net.URL;
      import java.util.ArrayList;
-     import java.util.Collections;
-     import java.util.Comparator;
      import java.util.HashSet;
-     import java.util.LinkedHashMap;
      import java.util.List;
      import java.util.Set;
-     import java.util.concurrent.atomic.AtomicBoolean;
-     import java.util.concurrent.atomic.AtomicInteger;
      public class FluxProxy {
-       public static final String KEY_ENABLED = "fp_enabled";
-       public static final String KEY_WATCHDOG = "fp_watchdog";
-       public static final String KEY_SOURCES = "fp_sources";
-       public static final String KEY_INTERVAL = "fp_interval";
-       private static final String KEY_LAST = "fp_last";
-       private static final String KEY_CACHE = "fp_cache";
-       private static final String KEY_MANAGED = "fp_managed";
-       private static final String KEY_STATUS = "fp_status";
-       public static final String DEFAULT_SOURCES = @SOURCES@;
-       // основной источник: список Prem-VpnKey; когда он меняется на GitHub, приложение подхватывает изменения само
-       public static final String PRIMARY_URL = "@PRIMARY@";
-       private static final String KEY_PRIMARY = "fp_primary";
-       private static final String KEY_PRIMARY_HASH = "fp_primary_hash";
-       private static final long POLL_MS = 10L * 60L * 1000L;
-       private static final int MAX_PRIMARY = 100;
-       private static final int MAX_PROBE_PRIMARY = 30;
-       private static final boolean DEFAULT_ENABLED = @AUTO@;
-       public static final int[] INTERVAL_HOURS = {1, 3, 6, 12, 24};
-       public static final String[] INTERVAL_TITLES = {"1 час", "3 часа", "6 часов", "12 часов", "1 сутки"};
-       private static final int MAX_PROBE = 24;
-       private static final int KEEP = 3;
-       private static final int MAX_ENTRIES = 3000;
-       private static final int MAX_BYTES = 3 * 1024 * 1024;
-       private static final long PROBE_TIMEOUT_MS = 12000L;
-       private static final long BAD_STATE_MS = 20000L;
-       private static final long ROTATE_GAP_MS = 45000L;
-       private static final long TICK_MS = 5L * 60L * 1000L;
-       private static final long AUTO_ROTATE_MS = 5L * 60L * 1000L;
-       // встроенный список — зашивается при сборке, не требует сети при первом запуске
-       private static final String[] BAKED_PROXIES = @BAKED@;
-       private static final Object LOCK = new Object();
-       private static long lastAutoRotate;
-       private static long lastPoll;
-       private static boolean started;
-       private static boolean running;
-       private static long badSince;
-       private static long lastRotate;
-       private static volatile Runnable listener;
-       private static volatile List<Entry> ranked = new ArrayList<>();
-       private static volatile int rankIndex;
-       private static volatile long currentPing = -1;
-       private static volatile String currentKey = "";
-       private static volatile List<Entry> fallbackPrimary;
-       private interface PingCb {
-         void done(long ping);
+      public static final String KEY_ENABLED = "fp_enabled";
+      public static final String KEY_WATCHDOG = "fp_watchdog";
+      public static final String PRIMARY_URL = "@PRIMARY@";
+      private static final boolean DEFAULT_ENABLED = @AUTO@;
+      private static final String[] BAKED_PROXIES = @BAKED@;
+      private static final String KEY_CACHE = "fp_primary";
+      private static final String KEY_HASH = "fp_primary_hash";
+      private static final String KEY_MANAGED = "fp_managed";
+      private static final String KEY_STATUS = "fp_status";
+      private static final int MAX_ENTRIES = 200;
+      private static final long BAD_STATE_MS = 20000L;
+      private static final long ROTATE_GAP_MS = 30000L;
+      private static final long TICK_MS = 5L * 60L * 1000L;
+      private static final Object LOCK = new Object();
+      private static boolean started;
+      private static boolean running;
+      private static long badSince;
+      private static long lastRotate;
+      private static volatile Runnable listener;
+      private static volatile List<Entry> list = new ArrayList<>();
+      static final class Entry {
+       final String host;
+       final int port;
+       final String secret;
+       Entry(String h, int p, String s) {
+        host = h;
+        port = p;
+        secret = s;
        }
-       static final class Entry {
-         final String host;
-         final int port;
-         final String secret;
-         long ping = -1;
-         Entry(String host, int port, String secret) {
-           this.host = host;
-           this.port = port;
-           this.secret = secret;
+       String fk() {
+        return host.toLowerCase() + ":" + port + ":" + secret;
+       }
+      }
+      private static SharedPreferences prefs() {
+       Context c = ApplicationLoader.applicationContext;
+       return c == null ? null : c.getSharedPreferences("flux_proxy", Context.MODE_PRIVATE);
+      }
+      public static boolean get(String key) {
+       SharedPreferences p = prefs();
+       boolean def = KEY_ENABLED.equals(key) ? DEFAULT_ENABLED : true;
+       return p == null ? def : p.getBoolean(key, def);
+      }
+      public static void set(String key, boolean value) {
+       SharedPreferences p = prefs();
+       if (p != null) {
+        p.edit().putBoolean(key, value).apply();
+       }
+       if (KEY_ENABLED.equals(key) && value) {
+        refresh(true);
+       }
+      }
+      public static String status() {
+       SharedPreferences p = prefs();
+       String s = p == null ? "" : p.getString(KEY_STATUS, "");
+       return s == null || s.length() == 0 ? "Ещё не обновлялось" : s;
+      }
+      private static void setStatus(String s) {
+       SharedPreferences p = prefs();
+       if (p != null) {
+        p.edit().putString(KEY_STATUS, s).apply();
+       }
+       notifyListener();
+      }
+      public static void setListener(Runnable r) {
+       listener = r;
+      }
+      private static void notifyListener() {
+       final Runnable r = listener;
+       if (r != null) {
+        AndroidUtilities.runOnUIThread(r);
+       }
+      }
+      public static boolean isRunning() {
+       synchronized (LOCK) {
+        return running;
+       }
+      }
+      private static boolean enabled() {
+       return get(KEY_ENABLED);
+      }
+      private static boolean proxyEnabled() {
+       try {
+        return MessagesController.getGlobalMainSettings().getBoolean("proxy_enabled", false);
+       } catch (Throwable t) {
+        return false;
+       }
+      }
+      private static int intConst(String name, int def) {
+       try {
+        return ConnectionsManager.class.getField(name).getInt(null);
+       } catch (Throwable t) {
+        return def;
+       }
+      }
+      private static int state() {
+       try {
+        return ConnectionsManager.getInstance(UserConfig.selectedAccount).getConnectionState();
+       } catch (Throwable t) {
+        return -1;
+       }
+      }
+      private static boolean connected() {
+       int st = state();
+       return st == intConst("ConnectionStateConnected", 3) || st == intConst("ConnectionStateUpdating", 5);
+      }
+      private static boolean stuckConnecting() {
+       int st = state();
+       return st == intConst("ConnectionStateConnecting", 1) || st == intConst("ConnectionStateConnectingToProxy", 4);
+      }
+      // ключ host:port:secret прокси, который сейчас включён в Telegram (в том числе выбранного вручную)
+      private static String activeKey() {
+       try {
+        SharedPreferences s = MessagesController.getGlobalMainSettings();
+        String ip = s.getString("proxy_ip", "");
+        if (!s.getBoolean("proxy_enabled", false) || ip == null || ip.length() == 0) {
+         return "";
+        }
+        return ip.toLowerCase() + ":" + s.getInt("proxy_port", 0) + ":" + s.getString("proxy_secret", "");
+       } catch (Throwable t) {
+        return "";
+       }
+      }
+      private static final NotificationCenter.NotificationCenterDelegate OBS = new NotificationCenter.NotificationCenterDelegate() {
+       @Override
+       public void didReceivedNotification(int id, int account, Object... args) {
+        if (id == NotificationCenter.didUpdateConnectionState) {
+         onState();
+        }
+       }
+      };
+      private static final Runnable TICK = new Runnable() {
+       @Override
+       public void run() {
+        try {
+         if (enabled() && !isRunning()) {
+          poll();
          }
-         String key() {
-           return host.toLowerCase() + ":" + port;
+        } catch (Throwable t) {
+         FileLog.e(t);
+        }
+        AndroidUtilities.runOnUIThread(this, TICK_MS);
+       }
+      };
+      public static void startup() {
+       synchronized (LOCK) {
+        if (started) {
+         return;
+        }
+        started = true;
+       }
+       if (ApplicationLoader.applicationContext == null) {
+        synchronized (LOCK) {
+         started = false;
+        }
+        return;
+       }
+       try {
+        NotificationCenter.getGlobalInstance().addObserver(OBS, NotificationCenter.didUpdateConnectionState);
+        for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+         NotificationCenter.getInstance(a).addObserver(OBS, NotificationCenter.didUpdateConnectionState);
+        }
+       } catch (Throwable t) {
+        FileLog.e(t);
+       }
+       if (enabled()) {
+        boolean off = !proxyEnabled();
+        List<Entry> known = loadCache();
+        if (known.isEmpty()) {
+         known = loadBaked();
+        }
+        list = known;
+        if (off && !known.isEmpty()) {
+         // сразу подключаем первый прокси, не дожидаясь сети
+         for (int i = known.size() - 1; i >= 0; i--) {
+          addInfo(known.get(i));
          }
-         String fk() {
-           return host.toLowerCase() + ":" + port + ":" + secret;
-         }
+         apply(known.get(0));
+         setStatus("Подключён " + known.get(0).host + " (сохранённый список)");
+        }
+        if (off) {
+         refresh(true);
+        } else {
+         poll();
+        }
        }
-       private static SharedPreferences prefs() {
-         Context c = ApplicationLoader.applicationContext;
-         return c == null ? null : c.getSharedPreferences("flux_proxy", Context.MODE_PRIVATE);
-       }
-       public static boolean get(String key) {
-         SharedPreferences p = prefs();
-         boolean def = KEY_ENABLED.equals(key) ? DEFAULT_ENABLED : true;
-         return p == null ? def : p.getBoolean(key, def);
-       }
-       public static void set(String key, boolean value) {
-         SharedPreferences p = prefs();
-         if (p != null) {
-           p.edit().putBoolean(key, value).apply();
-         }
-         if (KEY_ENABLED.equals(key) && value) {
-           refresh(true);
-         }
-       }
-       public static boolean enabled() {
-         return get(KEY_ENABLED);
-       }
-       public static int interval() {
-         SharedPreferences p = prefs();
-         int i = p == null ? 2 : p.getInt(KEY_INTERVAL, 2);
-         return Math.max(0, Math.min(INTERVAL_HOURS.length - 1, i));
-       }
-       public static void setInterval(int index) {
-         SharedPreferences p = prefs();
-         if (p != null) {
-           p.edit().putInt(KEY_INTERVAL, index).apply();
-         }
-       }
-       public static String sourcesText() {
-         SharedPreferences p = prefs();
-         return p == null ? DEFAULT_SOURCES : p.getString(KEY_SOURCES, DEFAULT_SOURCES);
-       }
-       public static void setSourcesText(String value) {
-         SharedPreferences p = prefs();
-         if (p != null) {
-           p.edit().putString(KEY_SOURCES, value == null ? "" : value).apply();
-         }
-       }
-       private static List<String> sources() {
-         ArrayList<String> out = new ArrayList<>();
-         String raw = sourcesText();
-         if (raw == null) {
-           return out;
-         }
-         for (String s : raw.split("[\\s,]+")) {
-           if (s.startsWith("http://") || s.startsWith("https://")) {
-             out.add(s);
-           }
-         }
-         return out;
-       }
-       public static String status() {
-         SharedPreferences p = prefs();
-         String s = p == null ? "" : p.getString(KEY_STATUS, "");
-         return s == null || s.length() == 0 ? "Ещё не обновлялось" : s;
-       }
-       private static void setStatus(String s) {
-         SharedPreferences p = prefs();
-         if (p != null) {
-           p.edit().putString(KEY_STATUS, s).apply();
-         }
-         notifyListener();
-       }
-       public static void setListener(Runnable r) {
-         listener = r;
-       }
-       private static void notifyListener() {
-         final Runnable r = listener;
-         if (r != null) {
-           AndroidUtilities.runOnUIThread(r);
-         }
-       }
-       public static boolean isRunning() {
-         synchronized (LOCK) {
-           return running;
-         }
-       }
-       private static boolean due() {
-         SharedPreferences p = prefs();
-         if (p == null) {
-           return false;
-         }
-         long last = p.getLong(KEY_LAST, 0L);
-         return System.currentTimeMillis() - last > INTERVAL_HOURS[interval()] * 3600L * 1000L;
-       }
-       private static boolean proxyEnabled() {
-         try {
-           return MessagesController.getGlobalMainSettings().getBoolean("proxy_enabled", false);
-         } catch (Throwable t) {
-           return false;
-         }
-       }
-       private static int intConst(String name, int def) {
-         try {
-           return ConnectionsManager.class.getField(name).getInt(null);
-         } catch (Throwable t) {
-           return def;
-         }
-       }
-       private static int state() {
-         try {
-           return ConnectionsManager.getInstance(UserConfig.selectedAccount).getConnectionState();
-         } catch (Throwable t) {
-           return -1;
-         }
-       }
-       private static boolean connected() {
-         int st = state();
-         return st == intConst("ConnectionStateConnected", 3) || st == intConst("ConnectionStateUpdating", 5);
-       }
-       private static boolean stuckConnecting() {
-         int st = state();
-         return st == intConst("ConnectionStateConnecting", 1) || st == intConst("ConnectionStateConnectingToProxy", 4);
-       }
-       private static final NotificationCenter.NotificationCenterDelegate OBS = new NotificationCenter.NotificationCenterDelegate() {
-         @Override
-         public void didReceivedNotification(int id, int account, Object... args) {
-           if (id == NotificationCenter.didUpdateConnectionState) {
-             onState();
-           }
-         }
-       };
-       private static final Runnable TICK = new Runnable() {
+       AndroidUtilities.runOnUIThread(TICK, TICK_MS);
+      }
+      private static void onState() {
+       try {
+        if (!enabled() || !get(KEY_WATCHDOG)) {
+         return;
+        }
+        if (!stuckConnecting()) {
+         badSince = 0;
+         return;
+        }
+        if (badSince != 0) {
+         return;
+        }
+        final long stamp = SystemClock.elapsedRealtime();
+        badSince = stamp;
+        AndroidUtilities.runOnUIThread(new Runnable() {
          @Override
          public void run() {
-           try {
-             if (enabled()) {
-               long nowPoll = SystemClock.elapsedRealtime();
-               if (!isRunning() && !due() && nowPoll - lastPoll >= POLL_MS) {
-                 lastPoll = nowPoll;
-                 pollPrimary();
-               }
-               if (due() && !isRunning()) {
-                 refresh(false);
-               } else if (get(KEY_WATCHDOG)) {
-                 // авто-ротация каждые 5 минут если не подключён
-                 long now = SystemClock.elapsedRealtime();
-                 if (!connected() && lastAutoRotate != 0 && now - lastAutoRotate >= AUTO_ROTATE_MS) {
-                   lastAutoRotate = now;
-                   rotate();
-                 } else if (lastAutoRotate == 0) {
-                   lastAutoRotate = now;
-                 }
-               }
-             }
-           } catch (Throwable t) {
-             FileLog.e(t);
-           }
-           AndroidUtilities.runOnUIThread(this, TICK_MS);
+          if (badSince == stamp && stuckConnecting()) {
+           badSince = 0;
+           rotate();
+          }
          }
-       };
-       public static void startup() {
-         synchronized (LOCK) {
-           if (started) {
-             return;
-           }
-           started = true;
-         }
-         if (ApplicationLoader.applicationContext == null) {
-           synchronized (LOCK) {
-             started = false;
-           }
-           return;
-         }
+        }, BAD_STATE_MS);
+       } catch (Throwable t) {
+        FileLog.e(t);
+       }
+      }
+      // следующий прокси из списка по очереди (с учётом ручного выбора в Telegram)
+      private static void rotate() {
+       long now = SystemClock.elapsedRealtime();
+       if (lastRotate != 0 && now - lastRotate < ROTATE_GAP_MS) {
+        return;
+       }
+       lastRotate = now;
+       List<Entry> l = list;
+       if (l == null || l.isEmpty()) {
+        refresh(true);
+        return;
+       }
+       String act = activeKey();
+       int idx = -1;
+       for (int i = 0; i < l.size(); i++) {
+        if (l.get(i).fk().equals(act)) {
+         idx = i;
+         break;
+        }
+       }
+       Entry e = l.get((idx + 1) % l.size());
+       if (apply(e)) {
+        setStatus("Переключился на " + e.host + ":" + e.port + " (связь пропала)");
+       }
+      }
+      // если файл на GitHub изменился, обновляем список
+      private static void poll() {
+       Utilities.globalQueue.postRunnable(new Runnable() {
+        @Override
+        public void run() {
          try {
-           NotificationCenter.getGlobalInstance().addObserver(OBS, NotificationCenter.didUpdateConnectionState);
-           for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
-             NotificationCenter.getInstance(a).addObserver(OBS, NotificationCenter.didUpdateConnectionState);
-           }
+          if (isRunning()) {
+           return;
+          }
+          List<Entry> fresh = fetchList();
+          SharedPreferences p = prefs();
+          if (fresh != null && !fresh.isEmpty() && p != null && !hashOf(fresh).equals(p.getString(KEY_HASH, ""))) {
+           refresh(false);
+          }
          } catch (Throwable t) {
-           FileLog.e(t);
+          FileLog.e(t);
          }
-         if (enabled()) {
-           boolean off = !proxyEnabled();
-           List<Entry> known = loadPrimaryCache();
-           String knownFrom = "последний список GitHub";
-           if (known.isEmpty()) {
-             known = loadBaked();
-             knownFrom = "встроенный список";
-           }
-           if (!known.isEmpty()) {
-             ranked = new ArrayList<>(known);
-             rankIndex = 0;
-           }
-           if (off && !known.isEmpty()) {
-             // сразу подключаем первый прокси из списка, не дожидаясь сети
-             for (int i = known.size() - 1; i >= 0; i--) {
-               addInfo(known.get(i));
-             }
-             apply(known.get(0));
-             setStatus("FluxProxy: подключён " + known.get(0).host + " (" + knownFrom + ")");
-           }
-           if (off || due()) {
-             refresh(off);
-           } else {
-             lastPoll = SystemClock.elapsedRealtime();
-             pollPrimary();
-           }
-         }
-         lastAutoRotate = SystemClock.elapsedRealtime();
-         AndroidUtilities.runOnUIThread(TICK, TICK_MS);
+        }
+       });
+      }
+      public static void refresh(final boolean switchNow) {
+       synchronized (LOCK) {
+        if (running) {
+         return;
+        }
+        running = true;
        }
-       private static void onState() {
+       notifyListener();
+       Utilities.globalQueue.postRunnable(new Runnable() {
+        @Override
+        public void run() {
          try {
-           if (!enabled() || !get(KEY_WATCHDOG)) {
-             return;
-           }
-           if (!stuckConnecting()) {
-             badSince = 0;
-             return;
-           }
-           if (badSince != 0) {
-             return;
-           }
-           final long stamp = SystemClock.elapsedRealtime();
-           badSince = stamp;
-           AndroidUtilities.runOnUIThread(new Runnable() {
-             @Override
-             public void run() {
-               if (badSince == stamp && stuckConnecting()) {
-                 badSince = 0;
-                 rotate();
-               }
-             }
-           }, BAD_STATE_MS);
+          doRefresh(switchNow);
          } catch (Throwable t) {
-           FileLog.e(t);
+          FileLog.e(t);
+          setStatus("Ошибка обновления: " + t.getMessage());
+          finish();
          }
+        }
+       });
+      }
+      private static void finish() {
+       synchronized (LOCK) {
+        running = false;
        }
-       private static void rotate() {
-         long now = SystemClock.elapsedRealtime();
-         if (lastRotate != 0 && now - lastRotate < ROTATE_GAP_MS) {
-           return;
-         }
-         lastRotate = now;
-         List<Entry> list = ranked;
-         if (list == null || list.isEmpty()) {
-           refresh(true);
-           return;
-         }
-         // текущий прокси мог быть выбран вручную в списке Telegram: идём дальше от него
-         String act = activeKey();
-         int idx = -1;
-         for (int i = 0; i < list.size(); i++) {
-           if (list.get(i).fk().equals(act)) {
-             idx = i;
-             break;
-           }
-         }
-         int next = idx >= 0 ? idx + 1 : 0;
-         if (next >= list.size()) {
-           rankIndex = 0;
-           refresh(true);
-           return;
-         }
-         rankIndex = next;
-         Entry e = list.get(next);
-         if (apply(e)) {
-           setStatus("Переключился на " + e.host + ":" + e.port + " (связь пропала)");
-         }
+       notifyListener();
+      }
+      private static void doRefresh(final boolean switchNow) {
+       List<Entry> l = fetchList();
+       String origin = "GitHub";
+       if (l != null && !l.isEmpty()) {
+        saveCache(l);
+       } else {
+        l = loadCache();
+        origin = "сохранённый список";
+        if (l.isEmpty()) {
+         l = loadBaked();
+         origin = "встроенный список";
+        }
        }
-       public static void refresh(final boolean switchNow) {
-         synchronized (LOCK) {
-           if (running) {
-             return;
-           }
-           running = true;
-         }
-         notifyListener();
-         Utilities.globalQueue.postRunnable(new Runnable() {
-           @Override
-           public void run() {
-             try {
-               doRefresh(switchNow);
-             } catch (Throwable t) {
-               FileLog.e(t);
-               setStatus("Ошибка обновления: " + t.getMessage());
-               finish();
-             }
-           }
-         });
+       if (l.isEmpty()) {
+        setStatus("Список недоступен (GitHub не отвечает, кэш пуст)");
+        finish();
+        return;
        }
-       private static void finish() {
-         synchronized (LOCK) {
-           running = false;
-         }
-         notifyListener();
-       }
-       private static void doRefresh(boolean switchNow) {
-         fallbackPrimary = null;
-         List<Entry> primary = fetchPrimary(true);
-         String origin = "GitHub";
-         if (primary != null && !primary.isEmpty()) {
-           savePrimary(primary);
-         } else {
-           primary = loadPrimaryCache();
-           origin = "кэш";
-           if (primary.isEmpty()) {
-             primary = loadBaked();
-             origin = "встроенный список";
-           }
-         }
-         if (primary.isEmpty()) {
-           doPublic(switchNow);
-           return;
-         }
-         SharedPreferences sp = prefs();
-         if (sp != null) {
-           sp.edit().putLong(KEY_LAST, System.currentTimeMillis()).apply();
-         }
-         List<Entry> toProbe = primary.size() > MAX_PROBE_PRIMARY ? new ArrayList<>(primary.subList(0, MAX_PROBE_PRIMARY)) : new ArrayList<>(primary);
-         probe(toProbe, switchNow, primary.size(), origin, primary);
-       }
-       private static void doPublic(boolean switchNow) {
-         LinkedHashMap<String, Entry> all = new LinkedHashMap<>();
-         int okSources = 0;
-         List<String> src = sources();
-         for (String url : src) {
-           String body = fetch(url);
-           if (body == null) {
-             String m = mirror(url);
-             if (m != null) {
-               body = fetch(m);
-             }
-           }
-           if (body == null) {
-             continue;
-           }
-           okSources++;
-           for (Entry e : parse(body)) {
-             if (all.size() >= MAX_ENTRIES) {
-               break;
-             }
-             if (!all.containsKey(e.key())) {
-               all.put(e.key(), e);
-             }
-           }
-         }
-         List<Entry> list = new ArrayList<>(all.values());
-         boolean fromCache = false;
-         if (list.isEmpty()) {
-           list = loadCache();
-           fromCache = true;
-         } else {
-           saveCache(list);
-           SharedPreferences p = prefs();
-           if (p != null) {
-             p.edit().putLong(KEY_LAST, System.currentTimeMillis()).apply();
-           }
-         }
-         if (list.isEmpty()) {
-           if (fallbackPrimary != null) {
-             setStatus(when() + ": ни один прокси из списка GitHub не ответил на проверку, резервные источники недоступны. Подключён первый из списка, при обрыве возьму следующий");
-             finish();
-             return;
-           }
-           List<Entry> baked = loadBaked();
-           if (!baked.isEmpty()) {
-             Collections.shuffle(baked);
-             probe(baked, switchNow, baked.size(), "встроенный список", null);
-           } else {
-             setStatus("Источники недоступны (" + okSources + "/" + src.size() + "), кэш пуст");
-             finish();
-           }
-           return;
-         }
-         final int total = list.size();
-         final String origin = fromCache ? "из кэша" : "источников " + okSources + "/" + src.size();
-         Collections.shuffle(list);
-         if (list.size() > MAX_PROBE) {
-           list = new ArrayList<>(list.subList(0, MAX_PROBE));
-         }
-         probe(list, switchNow, total, origin, null);
-       }
-       private static void probe(List<Entry> list, final boolean switchNow, final int total, final String origin, final List<Entry> primary) {
-         final List<Entry> results = Collections.synchronizedList(new ArrayList<Entry>());
-         final AtomicInteger left = new AtomicInteger(list.size());
-         final AtomicBoolean done = new AtomicBoolean(false);
-         final int probed = list.size();
-         final Runnable fin = new Runnable() {
-           @Override
-           public void run() {
-             if (done.compareAndSet(false, true)) {
-               final ArrayList<Entry> copy;
-               synchronized (results) {
-                 copy = new ArrayList<>(results);
-               }
-               AndroidUtilities.runOnUIThread(new Runnable() {
-                 @Override
-                 public void run() {
-                   try {
-                     applyRanked(copy, probed, total, origin, switchNow, primary);
-                   } catch (Throwable t) {
-                     FileLog.e(t);
-                     setStatus("Ошибка применения: " + t.getMessage());
-                     finish();
-                   }
-                 }
-               });
-             }
-           }
-         };
-         for (final Entry e : list) {
-           boolean launched = check(e, new PingCb() {
-             @Override
-             public void done(long ping) {
-               if (ping > 0) {
-                 e.ping = ping;
-                 results.add(e);
-               }
-               if (left.decrementAndGet() == 0) {
-                 fin.run();
-               }
-             }
-           });
-           if (!launched && left.decrementAndGet() == 0) {
-             fin.run();
-           }
-         }
-         AndroidUtilities.runOnUIThread(fin, PROBE_TIMEOUT_MS);
-       }
-       private static void applyRanked(List<Entry> results, int probed, int total, String origin, boolean switchNow, List<Entry> primary) {
-         if (primary != null) {
-           applyPrimary(results, primary, probed, origin, switchNow);
-           return;
-         }
-         final List<Entry> fbl = fallbackPrimary;
-         if (results.isEmpty()) {
-           if (fbl != null) {
-             setStatus(when() + ": ни один прокси не ответил ни из списка GitHub, ни из резервных источников. Идём по списку GitHub по очереди");
-           } else {
-             setStatus("Рабочих нет: проверено " + probed + " из " + total + " (" + origin + ")");
-           }
-           finish();
-           return;
-         }
-         Collections.sort(results, new Comparator<Entry>() {
-           @Override
-           public int compare(Entry a, Entry b) {
-             return a.ping < b.ping ? -1 : (a.ping == b.ping ? 0 : 1);
-           }
-         });
-         ArrayList<Entry> rk = new ArrayList<>(results);
-         if (fbl != null) {
-           rk.addAll(fbl);
-         }
-         ranked = rk;
-         rankIndex = 0;
-         List<Entry> keep = results.subList(0, Math.min(KEEP, results.size()));
-         HashSet<String> keepKeys = new HashSet<>();
-         for (Entry e : keep) {
-           addInfo(e);
-           keepKeys.add(e.fk());
-         }
-         // прокси из основного списка GitHub не трогаем
-         for (Entry pe : loadPrimaryCache()) {
-           keepKeys.add(pe.fk());
-         }
-         if (fbl != null) {
-           for (Entry pe : fbl) {
-             keepKeys.add(pe.fk());
-           }
-         }
-         boolean bad = !connected() || !proxyEnabled();
-         Entry best = keep.get(0);
-         String line;
-         if (switchNow || bad) {
-           apply(best);
-           keepKeys.add(best.fk());
-           line = "Подключён " + best.host + ":" + best.port + " (" + best.ping + " мс)";
-         } else {
-           line = "Текущий прокси оставлен, запас: " + best.host + ":" + best.port + " (" + best.ping + " мс)";
-         }
-         String actNow = activeKey();
-         if (actNow.length() > 0) {
-           keepKeys.add(actNow);
-         }
-         cleanupManaged(keepKeys);
-         SharedPreferences p = prefs();
-         if (p != null) {
-           p.edit().putStringSet(KEY_MANAGED, new HashSet<>(keepKeys)).apply();
-         }
-         String when = new java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault()).format(new java.util.Date());
-         setStatus(when + ": " + line + ". Рабочих " + results.size() + " из " + probed + ", в списках " + total + " (" + origin + ")");
-         finish();
-       }
-       private static final Comparator<Entry> BY_PING = new Comparator<Entry>() {
-         @Override
-         public int compare(Entry a, Entry b) {
-           return a.ping < b.ping ? -1 : (a.ping == b.ping ? 0 : 1);
-         }
-       };
-       private static String when() {
-         return new java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault()).format(new java.util.Date());
-       }
-       // ключ host:port:secret прокси, который сейчас включён в Telegram (в том числе выбранного вручную)
-       private static String activeKey() {
+       final List<Entry> fl = l;
+       final String fo = origin;
+       AndroidUtilities.runOnUIThread(new Runnable() {
+        @Override
+        public void run() {
          try {
-           SharedPreferences s = MessagesController.getGlobalMainSettings();
-           if (!s.getBoolean("proxy_enabled", false)) {
-             return "";
-           }
-           String ip = s.getString("proxy_ip", "");
-           if (ip == null || ip.length() == 0) {
-             return "";
-           }
-           return ip.toLowerCase() + ":" + s.getInt("proxy_port", 0) + ":" + s.getString("proxy_secret", "");
+          applyList(fl, switchNow, fo);
          } catch (Throwable t) {
-           return "";
+          FileLog.e(t);
+          setStatus("Ошибка применения: " + t.getMessage());
+          finish();
          }
+        }
+       });
+      }
+      // весь список кладём в список прокси Telegram, подключаем первый, остальные идут по очереди
+      private static void applyList(List<Entry> l, boolean switchNow, String origin) {
+       list = l;
+       HashSet<String> keys = new HashSet<>();
+       for (Entry e : l) {
+        keys.add(e.fk());
        }
-       private static void saveManaged(Set<String> keys) {
-         SharedPreferences p = prefs();
-         if (p != null) {
-           p.edit().putStringSet(KEY_MANAGED, new HashSet<>(keys)).apply();
-         }
+       for (int i = l.size() - 1; i >= 0; i--) {
+        addInfo(l.get(i));
        }
-       private static String hashOf(List<Entry> list) {
-         StringBuilder sb = new StringBuilder();
-         for (Entry e : list) {
-           sb.append(e.fk()).append('\n');
-         }
-         return list.size() + ":" + Integer.toHexString(sb.toString().hashCode());
+       String act = activeKey();
+       SharedPreferences p = prefs();
+       Set<String> old = p == null ? null : p.getStringSet(KEY_MANAGED, null);
+       boolean dropped = act.length() > 0 && !keys.contains(act) && old != null && old.contains(act);
+       String line;
+       if (switchNow || !connected() || !proxyEnabled() || dropped) {
+        apply(l.get(0));
+        line = "подключён " + l.get(0).host + ":" + l.get(0).port;
+       } else {
+        line = "текущий прокси оставлен";
        }
-       private static List<Entry> fetchPrimary(boolean allowMirror) {
-         if (PRIMARY_URL.length() == 0) {
-           return null;
-         }
-         String body = fetch(PRIMARY_URL);
-         if (body == null && allowMirror) {
-           String m = mirror(PRIMARY_URL);
-           if (m != null) {
-             body = fetch(m);
-           }
-         }
-         if (body == null) {
-           return null;
-         }
-         ArrayList<Entry> out = new ArrayList<>();
-         HashSet<String> seen = new HashSet<>();
-         for (Entry e : parse(body)) {
-           if (out.size() >= MAX_PRIMARY) {
-             break;
-           }
-           if (seen.add(e.key())) {
-             out.add(e);
-           }
-         }
-         return out;
+       String now = activeKey();
+       if (now.length() > 0) {
+        keys.add(now);
        }
-       private static void savePrimary(List<Entry> list) {
-         SharedPreferences p = prefs();
-         if (p == null) {
-           return;
-         }
-         StringBuilder sb = new StringBuilder();
-         for (Entry e : list) {
-           sb.append(e.host).append('|').append(e.port).append('|').append(e.secret).append('\n');
-         }
-         p.edit().putString(KEY_PRIMARY, sb.toString()).putString(KEY_PRIMARY_HASH, hashOf(list)).apply();
+       cleanupManaged(keys);
+       if (p != null) {
+        p.edit().putStringSet(KEY_MANAGED, new HashSet<>(keys)).apply();
        }
-       private static List<Entry> loadPrimaryCache() {
-         ArrayList<Entry> out = new ArrayList<>();
-         SharedPreferences p = prefs();
-         String raw = p == null ? null : p.getString(KEY_PRIMARY, null);
-         if (raw == null) {
-           return out;
+       String when = new java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault()).format(new java.util.Date());
+       setStatus(when + ": " + line + ". Прокси в списке: " + l.size() + " (" + origin + ")");
+       finish();
+      }
+      private static Field field(Class<?> c, String name) throws Exception {
+       Field f = c.getDeclaredField(name);
+       f.setAccessible(true);
+       return f;
+      }
+      private static Object addInfo(Entry e) {
+       try {
+        Class<?> sc = Class.forName("org.telegram.messenger.SharedConfig");
+        Class<?> pi = Class.forName("org.telegram.messenger.SharedConfig$ProxyInfo");
+        Object info = pi.getConstructor(String.class, int.class, String.class, String.class, String.class).newInstance(e.host, e.port, "", "", e.secret);
+        try {
+         Object added = sc.getMethod("addProxy", pi).invoke(null, info);
+         if (pi.isInstance(added)) {
+          info = added;
          }
-         for (String line : raw.split("\n")) {
-           String[] a = line.split("\\|");
-           if (a.length == 3) {
-             Entry e = make(a[0], a[1], a[2]);
-             if (e != null) {
-               out.add(e);
-             }
-           }
-         }
-         return out;
+        } catch (Throwable ignore) {
+        }
+        return info;
+       } catch (Throwable t) {
+        FileLog.e(t);
+        return null;
        }
-       // лёгкая проверка: если файл на GitHub изменился, запускаем полное обновление
-       private static void pollPrimary() {
-         Utilities.globalQueue.postRunnable(new Runnable() {
-           @Override
-           public void run() {
-             try {
-               if (!enabled() || isRunning()) {
-                 return;
-               }
-               List<Entry> fresh = fetchPrimary(false);
-               if (fresh == null || fresh.isEmpty()) {
-                 return;
-               }
-               SharedPreferences p = prefs();
-               String old = p == null ? "" : p.getString(KEY_PRIMARY_HASH, "");
-               if (!hashOf(fresh).equals(old)) {
-                 refresh(false);
-               }
-             } catch (Throwable t) {
-               FileLog.e(t);
-             }
-           }
-         });
-       }
-       // основной список: весь целиком кладём в список прокси Telegram, подключаем самый быстрый, остальные идут по очереди
-       private static void applyPrimary(List<Entry> results, List<Entry> primary, int probed, String origin, final boolean switchNow) {
-         Collections.sort(results, BY_PING);
-         ArrayList<Entry> order = new ArrayList<>(results);
-         HashSet<String> okKeys = new HashSet<>();
-         for (Entry e : results) {
-           okKeys.add(e.fk());
-         }
-         HashSet<String> listKeys = new HashSet<>();
-         for (Entry e : primary) {
-           listKeys.add(e.fk());
-           if (!okKeys.contains(e.fk())) {
-             order.add(e);
-           }
-         }
-         // первый прокси из файла окажется сверху в списке Telegram
-         for (int i = primary.size() - 1; i >= 0; i--) {
-           addInfo(primary.get(i));
-         }
-         String act = activeKey();
-         boolean bad = !connected() || !proxyEnabled();
-         SharedPreferences p = prefs();
-         Set<String> oldManaged = p == null ? null : p.getStringSet(KEY_MANAGED, null);
-         boolean droppedCurrent = act.length() > 0 && !listKeys.contains(act) && oldManaged != null && oldManaged.contains(act);
-         ranked = order;
-         rankIndex = 0;
-         String line;
-         boolean needFallback = false;
-         if (results.isEmpty()) {
-           if (switchNow || bad) {
-             Entry first = order.get(0);
-             apply(first);
-             needFallback = true;
-             line = "ни один не ответил на проверку, подключён первый " + first.host + ":" + first.port + ", проверяю резервные источники";
-           } else {
-             line = "ни один не ответил на проверку, текущий прокси оставлен";
-           }
-         } else if (switchNow || bad || droppedCurrent) {
-           Entry first = order.get(0);
-           apply(first);
-           line = "подключён " + first.host + ":" + first.port + " (" + first.ping + " мс)";
-         } else {
-           line = "текущий прокси оставлен";
-         }
-         HashSet<String> keep = new HashSet<>(listKeys);
-         String act2 = activeKey();
-         if (act2.length() > 0) {
-           keep.add(act2);
-         }
-         cleanupManaged(keep);
-         saveManaged(keep);
-         setStatus(when() + ": " + line + ". В списке " + primary.size() + ", отвечают " + results.size() + " из " + probed + " (" + origin + ")");
-         if (needFallback) {
-           fallbackPrimary = order;
-           Utilities.globalQueue.postRunnable(new Runnable() {
-             @Override
-             public void run() {
-               try {
-                 doPublic(false);
-               } catch (Throwable t) {
-                 FileLog.e(t);
-                 finish();
-               }
-             }
-           });
-           return;
-         }
-         finish();
-       }
-       private static boolean check(Entry e, final PingCb cb) {
+      }
+      private static boolean apply(Entry e) {
+       try {
+        Class<?> sc = Class.forName("org.telegram.messenger.SharedConfig");
+        Object info = addInfo(e);
+        MessagesController.getGlobalMainSettings().edit().putBoolean("proxy_enabled", true).putString("proxy_ip", e.host).putInt("proxy_port", e.port).putString("proxy_user", "").putString("proxy_pass", "").putString("proxy_secret", e.secret).apply();
+        if (info != null) {
          try {
-           Object inst = ConnectionsManager.getInstance(UserConfig.selectedAccount);
-           for (Method m : ConnectionsManager.class.getMethods()) {
-             if (!m.getName().equals("checkProxy")) {
-               continue;
-             }
-             Class<?>[] pt = m.getParameterTypes();
-             Object[] args;
-             if (pt.length == 6) {
-               args = new Object[]{e.host, e.port, "", "", e.secret, null};
-             } else if (pt.length == 4) {
-               args = new Object[]{e.host, e.port, e.secret, null};
-             } else {
-               continue;
-             }
-             Class<?> dt = pt[pt.length - 1];
-             if (!dt.isInterface()) {
-               continue;
-             }
-             args[args.length - 1] = Proxy.newProxyInstance(dt.getClassLoader(), new Class<?>[]{dt}, new InvocationHandler() {
-               @Override
-               public Object invoke(Object proxy, Method method, Object[] a) {
-                 if (method.getDeclaringClass() == Object.class) {
-                   String n = method.getName();
-                   if (n.equals("hashCode")) {
-                     return Integer.valueOf(System.identityHashCode(proxy));
-                   }
-                   if (n.equals("equals")) {
-                     return Boolean.valueOf(a != null && a.length > 0 && proxy == a[0]);
-                   }
-                   return "FluxProxyCheck";
-                 }
-                 long t = -1;
-                 if (a != null && a.length > 0 && a[0] instanceof Number) {
-                   t = ((Number) a[0]).longValue();
-                 }
-                 cb.done(t);
-                 return null;
-               }
-             });
-             m.invoke(inst, args);
-             return true;
-           }
-         } catch (Throwable t) {
-           FileLog.e(t);
+          field(sc, "currentProxy").set(null, info);
+         } catch (Throwable ignore) {
          }
-         return false;
+        }
+        for (Method m : ConnectionsManager.class.getMethods()) {
+         if (m.getName().equals("setProxySettings") && m.getParameterTypes().length == 6) {
+          m.invoke(null, true, e.host, e.port, "", "", e.secret);
+          break;
+         }
+        }
+        try {
+         int id = NotificationCenter.class.getField("proxySettingsChanged").getInt(null);
+         NotificationCenter.getGlobalInstance().postNotificationName(id);
+        } catch (Throwable ignore) {
+        }
+        return true;
+       } catch (Throwable t) {
+        FileLog.e(t);
+        return false;
        }
-       private static Field field(Class<?> c, String name) throws Exception {
-         Field f = c.getDeclaredField(name);
-         f.setAccessible(true);
-         return f;
+      }
+      // удаляем из списка Telegram прокси, которые мы добавляли раньше, а в списке GitHub их больше нет
+      private static void cleanupManaged(Set<String> keep) {
+       try {
+        SharedPreferences p = prefs();
+        Set<String> managed = p == null ? null : p.getStringSet(KEY_MANAGED, null);
+        if (managed == null || managed.isEmpty()) {
+         return;
+        }
+        Class<?> sc = Class.forName("org.telegram.messenger.SharedConfig");
+        Class<?> pi = Class.forName("org.telegram.messenger.SharedConfig$ProxyInfo");
+        Object listObj = field(sc, "proxyList").get(null);
+        if (!(listObj instanceof List)) {
+         return;
+        }
+        ArrayList<Object> snapshot = new ArrayList<Object>((List<?>) listObj);
+        Method del = sc.getMethod("deleteProxy", pi);
+        Field fa = field(pi, "address");
+        Field fp = field(pi, "port");
+        Field fs = field(pi, "secret");
+        for (Object o : snapshot) {
+         String key = String.valueOf(fa.get(o)).toLowerCase() + ":" + fp.getInt(o) + ":" + fs.get(o);
+         if (managed.contains(key) && !keep.contains(key)) {
+          del.invoke(null, o);
+         }
+        }
+       } catch (Throwable t) {
+        FileLog.e(t);
        }
-       private static Object addInfo(Entry e) {
-         try {
-           Class<?> sc = Class.forName("org.telegram.messenger.SharedConfig");
-           Class<?> pi = Class.forName("org.telegram.messenger.SharedConfig$ProxyInfo");
-           Object info = pi.getConstructor(String.class, int.class, String.class, String.class, String.class)
-               .newInstance(e.host, e.port, "", "", e.secret);
-           try {
-             Object added = sc.getMethod("addProxy", pi).invoke(null, info);
-             if (pi.isInstance(added)) {
-               info = added;
-             }
-           } catch (Throwable ignore) {
-           }
-           return info;
-         } catch (Throwable t) {
-           FileLog.e(t);
-           return null;
-         }
+      }
+      private static String hashOf(List<Entry> l) {
+       StringBuilder sb = new StringBuilder();
+       for (Entry e : l) {
+        sb.append(e.fk()).append('\n');
        }
-       private static boolean apply(Entry e) {
-         try {
-           Class<?> sc = Class.forName("org.telegram.messenger.SharedConfig");
-           Object info = addInfo(e);
-           MessagesController.getGlobalMainSettings().edit()
-               .putBoolean("proxy_enabled", true)
-               .putString("proxy_ip", e.host)
-               .putInt("proxy_port", e.port)
-               .putString("proxy_user", "")
-               .putString("proxy_pass", "")
-               .putString("proxy_secret", e.secret)
-               .apply();
-           if (info != null) {
-             try {
-               field(sc, "currentProxy").set(null, info);
-             } catch (Throwable ignore) {
-             }
-           }
-           for (Method m : ConnectionsManager.class.getMethods()) {
-             if (m.getName().equals("setProxySettings") && m.getParameterTypes().length == 6) {
-               m.invoke(null, true, e.host, e.port, "", "", e.secret);
-               break;
-             }
-           }
-           try {
-             int id = NotificationCenter.class.getField("proxySettingsChanged").getInt(null);
-             NotificationCenter.getGlobalInstance().postNotificationName(id);
-           } catch (Throwable ignore) {
-           }
-           currentKey = e.key();
-           currentPing = e.ping;
-           return true;
-         } catch (Throwable t) {
-           FileLog.e(t);
-           return false;
-         }
+       return l.size() + ":" + Integer.toHexString(sb.toString().hashCode());
+      }
+      private static void saveCache(List<Entry> l) {
+       SharedPreferences p = prefs();
+       if (p == null) {
+        return;
        }
-       private static void cleanupManaged(Set<String> keep) {
-         try {
-           SharedPreferences p = prefs();
-           Set<String> managed = p == null ? null : p.getStringSet(KEY_MANAGED, null);
-           if (managed == null || managed.isEmpty()) {
-             return;
-           }
-           Class<?> sc = Class.forName("org.telegram.messenger.SharedConfig");
-           Class<?> pi = Class.forName("org.telegram.messenger.SharedConfig$ProxyInfo");
-           Object listObj = field(sc, "proxyList").get(null);
-           if (!(listObj instanceof List)) {
-             return;
-           }
-           ArrayList<Object> snapshot = new ArrayList<Object>((List<?>) listObj);
-           Method del = sc.getMethod("deleteProxy", pi);
-           Field fa = field(pi, "address");
-           Field fp = field(pi, "port");
-           Field fs = field(pi, "secret");
-           for (Object o : snapshot) {
-             String hp = String.valueOf(fa.get(o)).toLowerCase() + ":" + fp.getInt(o);
-             String key = hp + ":" + fs.get(o);
-             if ((managed.contains(key) || managed.contains(hp)) && !keep.contains(key)) {
-               del.invoke(null, o);
-             }
-           }
-         } catch (Throwable t) {
-           FileLog.e(t);
-         }
+       StringBuilder sb = new StringBuilder();
+       for (Entry e : l) {
+        sb.append(e.host).append('|').append(e.port).append('|').append(e.secret).append('\n');
        }
-       private static void saveCache(List<Entry> list) {
-         SharedPreferences p = prefs();
-         if (p == null) {
-           return;
-         }
-         StringBuilder sb = new StringBuilder();
-         int n = 0;
-         for (Entry e : list) {
-           if (n++ >= 600) {
-             break;
-           }
-           sb.append(e.host).append('|').append(e.port).append('|').append(e.secret).append('\n');
-         }
-         p.edit().putString(KEY_CACHE, sb.toString()).apply();
+       p.edit().putString(KEY_CACHE, sb.toString()).putString(KEY_HASH, hashOf(l)).apply();
+      }
+      private static List<Entry> loadCache() {
+       SharedPreferences p = prefs();
+       return fromLines(p == null ? null : p.getString(KEY_CACHE, null));
+      }
+      private static List<Entry> loadBaked() {
+       StringBuilder sb = new StringBuilder();
+       for (String s : BAKED_PROXIES) {
+        sb.append(s).append('\n');
        }
-       private static List<Entry> loadCache() {
-         ArrayList<Entry> out = new ArrayList<>();
-         SharedPreferences p = prefs();
-         String raw = p == null ? null : p.getString(KEY_CACHE, null);
-         if (raw == null) {
-           return out;
-         }
-         for (String line : raw.split("\n")) {
-           String[] a = line.split("\\|");
-           if (a.length == 3) {
-             Entry e = make(a[0], a[1], a[2]);
-             if (e != null) {
-               out.add(e);
-             }
-           }
-         }
-         return out;
+       return fromLines(sb.toString());
+      }
+      private static List<Entry> fromLines(String raw) {
+       ArrayList<Entry> out = new ArrayList<>();
+       if (raw == null) {
+        return out;
        }
-       private static String mirror(String url) {
-         java.util.regex.Matcher m = java.util.regex.Pattern
-             .compile("^https://raw\\.githubusercontent\\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$").matcher(url);
-         if (!m.find()) {
-           return null;
+       for (String line : raw.split("\n")) {
+        String[] a = line.split("\\|");
+        if (a.length == 3) {
+         Entry e = make(a[0], a[1], a[2]);
+         if (e != null) {
+          out.add(e);
          }
-         return "https://cdn.jsdelivr.net/gh/" + m.group(1) + "/" + m.group(2) + "@" + m.group(3) + "/" + m.group(4);
+        }
        }
-       private static String fetch(String url) {
-         HttpURLConnection c = null;
-         try {
-           c = (HttpURLConnection) new URL(url).openConnection();
-           c.setConnectTimeout(10000);
-           c.setReadTimeout(15000);
-           c.setInstanceFollowRedirects(true);
-           c.setRequestProperty("User-Agent", "Mozilla/5.0");
-           if (c.getResponseCode() != 200) {
-             return null;
-           }
-           InputStream in = c.getInputStream();
-           ByteArrayOutputStream bo = new ByteArrayOutputStream();
-           byte[] buf = new byte[16384];
-           int r;
-           int total = 0;
-           while ((r = in.read(buf)) > 0) {
-             total += r;
-             if (total > MAX_BYTES) {
-               break;
-             }
-             bo.write(buf, 0, r);
-           }
-           in.close();
-           return bo.toString("UTF-8");
-         } catch (Throwable t) {
-           return null;
-         } finally {
-           if (c != null) {
-             c.disconnect();
-           }
-         }
+       return out;
+      }
+      // скачивает список с GitHub (при недоступности raw.githubusercontent.com берёт зеркало jsDelivr)
+      private static List<Entry> fetchList() {
+       String body = fetch(PRIMARY_URL);
+       if (body == null) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^https://raw\\.githubusercontent\\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$").matcher(PRIMARY_URL);
+        if (m.find()) {
+         body = fetch("https://cdn.jsdelivr.net/gh/" + m.group(1) + "/" + m.group(2) + "@" + m.group(3) + "/" + m.group(4));
+        }
        }
-       private static Entry make(String host, String port, String secret) {
-         try {
-           if (host == null || port == null || secret == null) {
-             return null;
-           }
-           host = host.trim();
-           secret = secret.trim();
-           int p = Integer.parseInt(port.trim());
-           if (host.length() == 0 || p < 1 || p > 65535 || secret.length() < 16) {
-             return null;
-           }
-           if (host.indexOf(' ') >= 0 || host.indexOf('/') >= 0) {
-             return null;
-           }
-           return new Entry(host, p, secret);
-         } catch (Throwable t) {
-           return null;
-         }
-       }
-       private static Entry fromToken(String tok) {
-         String s = tok.replace("&amp;", "&");
-         if (s.indexOf("proxy?") >= 0 && (s.startsWith("tg:") || s.contains("t.me/") || s.contains("telegram.me/"))) {
-           Uri u = Uri.parse(s);
-           String port = u.getQueryParameter("port");
-           if (port == null || port.trim().length() == 0) {
-             port = "443";
-           }
-           return make(u.getQueryParameter("server"), port, u.getQueryParameter("secret"));
-         }
-         if (s.indexOf("socks") >= 0 || s.startsWith("http")) {
-           return null;
-         }
-         String[] p = s.split(":");
-         if (p.length == 3) {
-           return make(p[0], p[1], p[2]);
-         }
-         if (p.length == 4 && p[2].equalsIgnoreCase("mtproto")) {
-           return make(p[0], p[1], p[3]);
-         }
+       return body == null ? null : parse(body);
+      }
+      private static String fetch(String url) {
+       HttpURLConnection c = null;
+       try {
+        c = (HttpURLConnection) new URL(url).openConnection();
+        c.setConnectTimeout(10000);
+        c.setReadTimeout(15000);
+        c.setInstanceFollowRedirects(true);
+        c.setRequestProperty("User-Agent", "Mozilla/5.0");
+        if (c.getResponseCode() != 200) {
          return null;
+        }
+        InputStream in = c.getInputStream();
+        ByteArrayOutputStream bo = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int r;
+        int total = 0;
+        while ((r = in.read(buf)) > 0 && (total += r) < 1024 * 1024) {
+         bo.write(buf, 0, r);
+        }
+        in.close();
+        return bo.toString("UTF-8");
+       } catch (Throwable t) {
+        return null;
+       } finally {
+        if (c != null) {
+         c.disconnect();
+        }
        }
-       private static List<Entry> loadBaked() {
-         ArrayList<Entry> out = new ArrayList<>();
-         for (String line : BAKED_PROXIES) {
-           if (line == null || line.length() == 0) continue;
-           String[] a = line.split("\\|");
-           if (a.length == 3) {
-             Entry e = make(a[0], a[1], a[2]);
-             if (e != null) out.add(e);
-           }
-         }
-         return out;
+      }
+      private static Entry make(String host, String port, String secret) {
+       try {
+        if (host == null || port == null || secret == null) {
+         return null;
+        }
+        host = host.trim();
+        secret = secret.trim();
+        int p = Integer.parseInt(port.trim());
+        if (host.length() == 0 || p < 1 || p > 65535 || secret.length() < 16 || host.indexOf(' ') >= 0 || host.indexOf('/') >= 0) {
+         return null;
+        }
+        return new Entry(host, p, secret);
+       } catch (Throwable t) {
+        return null;
        }
-       static List<Entry> parse(String body) {
-         ArrayList<Entry> out = new ArrayList<>();
-         if (body == null) {
-           return out;
-         }
-         String t = body.trim();
-         if (t.startsWith("[") || t.startsWith("{")) {
-           try {
-             JSONArray arr;
-             if (t.startsWith("[")) {
-               arr = new JSONArray(t);
-             } else {
-               JSONObject root = new JSONObject(t);
-               arr = root.optJSONArray("proxies");
-               if (arr == null) {
-                 arr = root.optJSONArray("data");
-               }
-             }
-             if (arr != null) {
-               for (int i = 0; i < arr.length(); i++) {
-                 Object x = arr.opt(i);
-                 if (x instanceof JSONObject) {
-                   JSONObject o = (JSONObject) x;
-                   String h = o.optString("host", o.optString("server", o.optString("ip", "")));
-                   Entry e = make(h, o.optString("port", ""), o.optString("secret", ""));
-                   if (e != null) {
-                     out.add(e);
-                   }
-                 } else if (x instanceof String) {
-                   Entry e = fromToken((String) x);
-                   if (e != null) {
-                     out.add(e);
-                   }
-                 }
-               }
-             }
-             if (!out.isEmpty()) {
-               return out;
-             }
-           } catch (Throwable ignore) {
-           }
-         }
-         for (String line : t.split("[\\r\\n]+")) {
-           for (String tok : line.trim().split("\\s+")) {
-             if (tok.length() == 0) {
-               continue;
-             }
-             Entry e = fromToken(tok);
-             if (e != null) {
-               out.add(e);
-             }
-           }
-         }
-         return out;
+      }
+      private static Entry fromToken(String tok) {
+       String s = tok.replace("&amp;", "&");
+       if (s.indexOf("proxy?") >= 0 && (s.startsWith("tg:") || s.contains("t.me/") || s.contains("telegram.me/"))) {
+        Uri u = Uri.parse(s);
+        String port = u.getQueryParameter("port");
+        if (port == null || port.trim().length() == 0) {
+         port = "443";
+        }
+        return make(u.getQueryParameter("server"), port, u.getQueryParameter("secret"));
        }
+       String[] p = s.split(":");
+       if (p.length == 3 && !s.startsWith("http")) {
+        return make(p[0], p[1], p[2]);
+       }
+       return null;
+      }
+      // ссылки t.me/proxy, t.me/webproxy (без порта = 443), tg://proxy и строки host:port:secret; дубли убираются
+      static List<Entry> parse(String body) {
+       ArrayList<Entry> out = new ArrayList<>();
+       HashSet<String> seen = new HashSet<>();
+       if (body == null) {
+        return out;
+       }
+       for (String tok : body.trim().split("\\s+")) {
+        Entry e = tok.length() == 0 ? null : fromToken(tok);
+        if (e != null && out.size() < MAX_ENTRIES && seen.add(e.host.toLowerCase() + ":" + e.port)) {
+         out.add(e);
+        }
+       }
+       return out;
+      }
      }
      """
      ACTIVITY_JAVA = r"""package org.telegram.ui;
      import android.content.Context;
-     import android.text.Editable;
-     import android.text.InputType;
-     import android.text.TextWatcher;
-     import android.view.Gravity;
      import android.view.View;
      import android.view.ViewGroup;
-     import android.widget.EditText;
      import android.widget.FrameLayout;
      import android.widget.LinearLayout;
      import android.widget.ScrollView;
@@ -6770,161 +6254,102 @@ jobs:
      import org.telegram.messenger.FluxProxy;
      import org.telegram.messenger.R;
      import org.telegram.ui.ActionBar.ActionBar;
-     import org.telegram.ui.ActionBar.AlertDialog;
      import org.telegram.ui.ActionBar.BaseFragment;
      import org.telegram.ui.ActionBar.Theme;
      import org.telegram.ui.Cells.HeaderCell;
      import org.telegram.ui.Cells.TextCheckCell;
      import org.telegram.ui.Cells.TextSettingsCell;
      public class FluxProxyActivity extends BaseFragment {
-       private TextSettingsCell intervalCell;
-       private TextSettingsCell refreshCell;
-       private TextView statusView;
-       private EditText sourcesEdit;
-       @Override
-       public View createView(final Context context) {
-         actionBar.setBackButtonImage(R.drawable.ic_ab_back);
-         actionBar.setAllowOverlayTitle(true);
-         actionBar.setTitle("Прокси FluxGram");
-         actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
-           @Override
-           public void onItemClick(int id) {
-             if (id == -1) {
-               finishFragment();
-             }
-           }
-         });
-         FrameLayout root = new FrameLayout(context);
-         root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
-         fragmentView = root;
-         ScrollView scroll = new ScrollView(context);
-         root.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-         LinearLayout list = new LinearLayout(context);
-         list.setOrientation(LinearLayout.VERTICAL);
-         scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-         addHeader(list, context, "Прокси MTProto из GitHub");
-         addSwitch(list, context, "Автопрокси", FluxProxy.KEY_ENABLED, true);
-         addSwitch(list, context, "Менять прокси при обрыве связи", FluxProxy.KEY_WATCHDOG, true);
-         intervalCell = new TextSettingsCell(context);
-         intervalCell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-         intervalCell.setOnClickListener(v -> {
-           AlertDialog.Builder b = new AlertDialog.Builder(context);
-           b.setTitle("Обновлять список каждые");
-           b.setItems(FluxProxy.INTERVAL_TITLES, (dialog, which) -> {
-             FluxProxy.setInterval(which);
-             updateInterval();
-           });
-           showDialog(b.create());
-         });
-         list.addView(intervalCell, matchWrap());
-         updateInterval();
-         addNote(list, context, "Список прокси берётся из репозитория Prem-VpnKey на GitHub и целиком добавляется в обычный список прокси Telegram (Настройки → Данные и память → Прокси). Подключается самый быстрый, при обрыве связи берётся следующий по очереди. Любой другой прокси можно выбрать вручную в списке Telegram. Когда список на GitHub меняется, приложение подхватывает изменения само (проверка каждые 10 минут). Выключатель останавливает всё, текущий прокси при этом не трогается.\nОсновной источник: " + FluxProxy.PRIMARY_URL);
-         addHeader(list, context, "Состояние");
-         refreshCell = new TextSettingsCell(context);
-         refreshCell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-         refreshCell.setOnClickListener(v -> {
-           if (!FluxProxy.isRunning()) {
-             FluxProxy.refresh(true);
-           }
-           updateStatus();
-         });
-         list.addView(refreshCell, matchWrap());
-         TextSettingsCell open = new TextSettingsCell(context);
-         open.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-         open.setText("Открыть список прокси", false);
-         open.setOnClickListener(v -> presentFragment(new ProxyListActivity()));
-         list.addView(open, matchWrap());
-         statusView = addNote(list, context, "");
-         updateStatus();
-         addHeader(list, context, "Резервные источники");
-         LinearLayout box = new LinearLayout(context);
-         box.setOrientation(LinearLayout.VERTICAL);
-         box.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-         sourcesEdit = new EditText(context);
-         sourcesEdit.setText(FluxProxy.sourcesText());
-         sourcesEdit.setTextSize(14);
-         sourcesEdit.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
-         sourcesEdit.setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
-         sourcesEdit.setBackground(null);
-         sourcesEdit.setGravity(Gravity.TOP | Gravity.START);
-         sourcesEdit.setMinLines(4);
-         sourcesEdit.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(12), AndroidUtilities.dp(21), AndroidUtilities.dp(12));
-         sourcesEdit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_VARIATION_URI);
-         sourcesEdit.addTextChangedListener(new TextWatcher() {
-           @Override
-           public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
-           @Override
-           public void onTextChanged(CharSequence s, int start, int before, int count) { }
-           @Override
-           public void afterTextChanged(Editable s) {
-             FluxProxy.setSourcesText(s.toString());
-           }
-         });
-         box.addView(sourcesEdit, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-         list.addView(box, matchWrap());
-         TextSettingsCell reset = new TextSettingsCell(context);
-         reset.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-         reset.setText("Вернуть источники по умолчанию", false);
-         reset.setOnClickListener(v -> {
-           FluxProxy.setSourcesText(FluxProxy.DEFAULT_SOURCES);
-           sourcesEdit.setText(FluxProxy.DEFAULT_SOURCES);
-         });
-         list.addView(reset, matchWrap());
-         addNote(list, context, "Нужны, только если ни один прокси из основного списка не ответил. Один адрес на строку. Читаются .txt и .json со ссылками tg://proxy, https://t.me/proxy и строками host:port:secret. Если raw.githubusercontent.com недоступен, берётся зеркало jsDelivr. Публичные прокси видят твой IP и метаданные трафика.");
-         FluxProxy.setListener(new Runnable() {
-           @Override
-           public void run() {
-             updateStatus();
-           }
-         });
-         return fragmentView;
-       }
-       @Override
-       public void onFragmentDestroy() {
-         FluxProxy.setListener(null);
-         super.onFragmentDestroy();
-       }
-       private void updateInterval() {
-         intervalCell.setTextAndValue("Обновлять список каждые", FluxProxy.INTERVAL_TITLES[FluxProxy.interval()], true);
-       }
-       private void updateStatus() {
-         if (statusView == null || refreshCell == null) {
-           return;
+      private TextSettingsCell refreshCell;
+      private TextView statusView;
+      @Override
+      public View createView(final Context context) {
+       actionBar.setBackButtonImage(R.drawable.ic_ab_back);
+       actionBar.setAllowOverlayTitle(true);
+       actionBar.setTitle("Прокси FluxGram");
+       actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
+        @Override
+        public void onItemClick(int id) {
+         if (id == -1) {
+          finishFragment();
          }
-         boolean run = FluxProxy.isRunning();
-         refreshCell.setText(run ? "Идёт проверка прокси…" : "Обновить и подключить сейчас", true);
-         statusView.setText(FluxProxy.status());
+        }
+       });
+       FrameLayout root = new FrameLayout(context);
+       root.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
+       fragmentView = root;
+       ScrollView scroll = new ScrollView(context);
+       root.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+       LinearLayout list = new LinearLayout(context);
+       list.setOrientation(LinearLayout.VERTICAL);
+       scroll.addView(list, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+       HeaderCell header = new HeaderCell(context);
+       header.setText("Прокси MTProto из GitHub");
+       header.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+       list.addView(header, matchWrap());
+       addSwitch(list, context, "Автопрокси", FluxProxy.KEY_ENABLED, true);
+       addSwitch(list, context, "Менять прокси при обрыве связи", FluxProxy.KEY_WATCHDOG, true);
+       addNote(list, context, "Весь список из репозитория Prem-VpnKey на GitHub добавляется в обычный список прокси Telegram (Настройки → Данные и память → Прокси) без проверки. Подключается первый, при обрыве связи берётся следующий по очереди. Любой другой можно выбрать вручную в списке Telegram. Когда список на GitHub меняется, приложение подхватывает изменения само (проверка каждые 5 минут). Выключатель останавливает всё, текущий прокси при этом не трогается.\nИсточник: " + FluxProxy.PRIMARY_URL);
+       refreshCell = new TextSettingsCell(context);
+       refreshCell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+       refreshCell.setOnClickListener(v -> {
+        if (!FluxProxy.isRunning()) {
+         FluxProxy.refresh(true);
+        }
+        updateStatus();
+       });
+       list.addView(refreshCell, matchWrap());
+       TextSettingsCell open = new TextSettingsCell(context);
+       open.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+       open.setText("Открыть список прокси", false);
+       open.setOnClickListener(v -> presentFragment(new ProxyListActivity()));
+       list.addView(open, matchWrap());
+       statusView = addNote(list, context, "");
+       updateStatus();
+       FluxProxy.setListener(new Runnable() {
+        @Override
+        public void run() {
+         updateStatus();
+        }
+       });
+       return fragmentView;
+      }
+      @Override
+      public void onFragmentDestroy() {
+       FluxProxy.setListener(null);
+       super.onFragmentDestroy();
+      }
+      private void updateStatus() {
+       if (statusView == null || refreshCell == null) {
+        return;
        }
-       private LinearLayout.LayoutParams matchWrap() {
-         return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-       }
-       private void addHeader(LinearLayout list, Context context, String title) {
-         HeaderCell header = new HeaderCell(context);
-         header.setText(title);
-         header.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-         list.addView(header, matchWrap());
-       }
-       private void addSwitch(LinearLayout list, Context context, String title, final String key, boolean divider) {
-         final TextCheckCell cell = new TextCheckCell(context);
-         cell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-         cell.setTextAndCheck(title, FluxProxy.get(key), divider);
-         cell.setOnClickListener(v -> {
-           boolean value = !FluxProxy.get(key);
-           FluxProxy.set(key, value);
-           cell.setChecked(value);
-           updateStatus();
-         });
-         list.addView(cell, matchWrap());
-       }
-       private TextView addNote(LinearLayout list, Context context, String text) {
-         TextView note = new TextView(context);
-         note.setText(text);
-         note.setTextSize(14);
-         note.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
-         note.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(10), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
-         list.addView(note, matchWrap());
-         return note;
-       }
+       refreshCell.setText(FluxProxy.isRunning() ? "Обновляю список…" : "Обновить и подключить сейчас", true);
+       statusView.setText(FluxProxy.status());
+      }
+      private LinearLayout.LayoutParams matchWrap() {
+       return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+      }
+      private void addSwitch(LinearLayout list, Context context, String title, final String key, boolean divider) {
+       final TextCheckCell cell = new TextCheckCell(context);
+       cell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+       cell.setTextAndCheck(title, FluxProxy.get(key), divider);
+       cell.setOnClickListener(v -> {
+        boolean value = !FluxProxy.get(key);
+        FluxProxy.set(key, value);
+        cell.setChecked(value);
+        updateStatus();
+       });
+       list.addView(cell, matchWrap());
+      }
+      private TextView addNote(LinearLayout list, Context context, String text) {
+       TextView note = new TextView(context);
+       note.setText(text);
+       note.setTextSize(14);
+       note.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+       note.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(10), AndroidUtilities.dp(21), AndroidUtilities.dp(16));
+       list.addView(note, matchWrap());
+       return note;
+      }
      }
      """
      import re, os, sys
@@ -6940,9 +6365,6 @@ jobs:
      def write(p, s):
        open(p, "w", encoding="utf-8").write(s)
      auto = os.environ.get("AUTO_PROXY", "true") != "false"
-     extra_urls = [u for u in re.split(r"[\s,]+", os.environ.get("PROXY_SOURCES", "")) if u.startswith("http")]
-     all_urls = DEFAULT_URLS + [u for u in extra_urls if u not in DEFAULT_URLS]
-     literal = '"' + "\\n".join(u.replace("\\", "").replace('"', "") for u in all_urls) + '"'
      baked_lines = []
      try:
        with open("/tmp/flux_baked.txt", "r") as bf:
@@ -6956,13 +6378,13 @@ jobs:
        baked_java = "{" + ", ".join('"%s"' % b.replace('"', '\\"') for b in baked_lines) + "}"
      else:
        baked_java = "{}"
-     print("автопрокси по умолчанию: %s, источников: %d, встроено прокси: %d" % (auto, len(all_urls), len(baked_lines)))
+     print("автопрокси по умолчанию: %s, встроено прокси: %d" % (auto, len(baked_lines)))
      primary_url = os.environ.get("PRIMARY_PROXY_URL", "").strip().replace("\\", "").replace('"', "")
-     proxy = PROXY_JAVA.replace("@SOURCES@", literal).replace("@AUTO@", "true" if auto else "false").replace("@BAKED@", baked_java).replace("@PRIMARY@", primary_url)
+     proxy = PROXY_JAVA.replace("@AUTO@", "true" if auto else "false").replace("@BAKED@", baked_java).replace("@PRIMARY@", primary_url)
      print("основной источник прокси: %s" % primary_url)
      write(SRC + "messenger/FluxProxy.java", proxy)
      write(SRC + "ui/FluxProxyActivity.java", ACTIVITY_JAVA)
-     ok("FluxProxy.java и FluxProxyActivity.java созданы (основной источник: %s, резервных: %d)" % (primary_url, len(all_urls)))
+     ok("FluxProxy.java и FluxProxyActivity.java созданы (источник: %s)" % primary_url)
      al_path = SRC + "messenger/ApplicationLoader.java"
      al = read(al_path)
      hooked = False
