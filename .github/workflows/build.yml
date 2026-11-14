@@ -6665,7 +6665,7 @@ jobs:
      proxy = PROXY_JAVA.replace("@SOURCES@", literal).replace("@AUTO@", "true" if auto else "false").replace("@BAKED@", baked_java)
      write(SRC + "messenger/FluxProxy.java", proxy)
      write(SRC + "ui/FluxProxyActivity.java", ACTIVITY_JAVA)
-     ok("FluxProxy.java и FluxProxyActivity.java созданы (источников: %d)" % len(urls))
+     ok("FluxProxy.java и FluxProxyActivity.java созданы (источников: %d)" % len(all_urls))
      al_path = SRC + "messenger/ApplicationLoader.java"
      al = read(al_path)
      hooked = False
