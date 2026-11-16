@@ -9899,13 +9899,14 @@ jobs:
            fail=1
          fi
        fi
-       unzip -p "$f" 'classes*.dex' > /tmp/all.dex
+       rm -rf /tmp/dexcheck && mkdir /tmp/dexcheck
+       unzip -o "$f" 'classes*.dex' -d /tmp/dexcheck > /dev/null
        for str in "Автоответчик" "Копировать с форматированием" "Автопрокси" "no_premium_lock" "always_translate" \
                   "copy_formatted" "auto_reply_delayed" "unlimited_pins" "unlimited_folders" \
                   "profile_color_free" "custom_emoji_free" "channel_stats_always" \
                   "deleted_msg_cache" "bot_button_copy" \
                   "no_download_limit" "roundrobin" "pingAll"; do
-         if ! grep -aq "$str" /tmp/all.dex; then
+         if ! grep -raq "$str" /tmp/dexcheck/; then
            echo "::error::В $f нет функции: $str"
            fail=1
          fi
