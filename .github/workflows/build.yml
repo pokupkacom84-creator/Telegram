@@ -1190,15 +1190,30 @@ jobs:
        warn("ChatMessageCell: не нашёл строку timeString = timeString(...) — пометка «удалено» не добавлена")
      chat = ui + "/ChatActivity.java"
      s = open(chat, encoding="utf-8").read()
-     ok = True
-     a = "public final static int OPTION_COPY = 3;"
-     if a not in s:
-       ok = False
-     else:
-       s = s.replace(a, a + "\n    public final static int OPTION_SPY_EDITS = 9001;", 1)
+     # --- определяем безопасное значение для OPTION_SPY_EDITS ---
+     # ищем ВСЕ числовые значения OPTION_* / int OPTION константы чтобы не конфликтовать
+     existing_vals = set(int(v) for v in re.findall(r'\bOPTION_\w+\s*=\s*(\d+)\s*;', s))
+     SPY_EDITS_VAL = 9001
+     while SPY_EDITS_VAL in existing_vals:
+       SPY_EDITS_VAL += 1
+     SPY_EDITS_CONST = "OPTION_SPY_EDITS"
+     ok_chat = True
+     # --- вставляем константу ---
+     # ищем любую OPTION_* константу (не только OPTION_COPY=3, которая может называться иначе)
+     opt_pat = re.compile(r'((?:public\s+)?(?:static\s+)?(?:final\s+)?(?:static\s+)?int\s+OPTION_\w+\s*=\s*\d+\s*;)')
+     first_opt = opt_pat.search(s)
+     if not first_opt:
+       warn("ChatActivity: не нашёл ни одной OPTION_* константы — пункт «История правок» не добавлен")
+       ok_chat = False
+     if ok_chat and SPY_EDITS_CONST not in s:
+       # вставляем нашу константу сразу после первой найденной OPTION_*
+       ins = first_opt.end()
+       decl = "\n    public static final int %s = %d;" % (SPY_EDITS_CONST, SPY_EDITS_VAL)
+       s = s[:ins] + decl + s[ins:]
+     # --- вставляем пункт меню ---
      m = re.search(r'\n([ \t]*)if \(type == -1\) \{\n', s)
      if not m:
-       ok = False
+       ok_chat = False
      else:
        ind = m.group(1)
        add = ("\n" + ind + "if (org.telegram.messenger.SpyMode.hasEdits(selectedObject)) {"
@@ -1207,19 +1222,21 @@ jobs:
            "\n" + ind + "    icons.add(R.drawable.msg_edit);"
            "\n" + ind + "}\n")
        s = s[:m.start()] + add + s[m.start():]
-     m = re.search(r'\n([ \t]*)case OPTION_COPY: \{', s)
-     if not m:
-       ok = False
+     # --- вставляем обработчик case ---
+     # ищем любой существующий case чтобы встать перед ним, не требуем именно OPTION_COPY
+     case_anchor = re.search(r'\n([ \t]*)case \w+:\s*\{', s)
+     if not case_anchor:
+       ok_chat = False
      else:
-       ind = m.group(1)
+       ind = case_anchor.group(1)
        case = ("\n" + ind + "case OPTION_SPY_EDITS: {"
            "\n" + ind + "    showDialog(org.telegram.messenger.SpyMode.editsDialog(getParentActivity(), selectedObject));"
            "\n" + ind + "    break;"
            "\n" + ind + "}")
-       s = s[:m.start()] + case + s[m.start():]
-     if ok:
+       s = s[:case_anchor.start()] + case + s[case_anchor.start():]
+     if ok_chat:
        open(chat, "w", encoding="utf-8").write(s)
-       print("ChatActivity: пункт «История правок» добавлен")
+       print("ChatActivity: пункт «История правок» добавлен (OPTION_SPY_EDITS=%d)" % SPY_EDITS_VAL)
      else:
        warn("ChatActivity: не нашёл нужные места — пункт «История правок» не добавлен")
      PY
@@ -4039,9 +4056,11 @@ jobs:
      import java.util.ArrayList;
      import java.util.Random;
      public class FluxThemesActivity extends BaseFragment implements NotificationCenter.NotificationCenterDelegate {
-         private static final String[] NAMES = {"Системные", "Океан", "Закат", "Лес", "Лаванда", "Роза", "Янтарь", "Бирюза", "Графит"};
-         private static final int[] HUES = {-1, 205, 18, 135, 265, 335, 42, 175, 215};
-         private static final int[] SATS = {48, 52, 62, 42, 50, 56, 72, 50, 7};
+         private static final String[] NAMES = {"Системные", "Material You", "iPhone", "Океан", "Закат", "Лес", "Лаванда", "Роза", "Янтарь", "Бирюза", "Графит"};
+         // Material You: hue=-2 (специальный флаг — система выдаёт акцент Android 12+)
+         // iPhone: hue=-3 (специальный флаг — серо-голубая палитра iOS)
+         private static final int[] HUES = {-1, -2, -3, 205, 18, 135, 265, 335, 42, 175, 215};
+         private static final int[] SATS = {48, 55, 22, 52, 62, 42, 50, 56, 72, 50, 7};
          private Context ctx;
          private FrameLayout root;
          private ScrollView scroll;
@@ -4150,7 +4169,7 @@ jobs:
                  }
              });
              list.addView(my, matchWrap());
-             addNote("Цвета приложения берутся из вашей палитры. «Системные» подхватывают обои (Android 12+), остальные работают на любой версии Android.");
+             addNote("Цвета приложения берутся из вашей палитры. «Системные» подхватывают обои (Android 12+), «Material You» включает динамические цвета M3 и также требует Android 12+, «iPhone» — серо-голубая палитра в стиле iOS. Остальные темы работают на любой версии Android.");
              addHeader("Палитра");
              HorizontalScrollView hs = new HorizontalScrollView(context);
              hs.setHorizontalScrollBarEnabled(false);
@@ -4172,7 +4191,21 @@ jobs:
                  sw.setOnClickListener(new View.OnClickListener() {
                      @Override
                      public void onClick(View v) {
-                         choose(hue, sat);
+                         if (hue == -2) {
+                             // Material You: включаем MYou и сбрасываем seed на системный
+                             FluxFeatures.setMaterialYou(context, true);
+                             FluxFeatures.setSeed(context, -1, 55);
+                             rebuildStack();
+                             updateUi(true);
+                         } else if (hue == -3) {
+                             // iPhone: выключаем MYou, ставим серо-голубой seed iOS
+                             FluxFeatures.setMaterialYou(context, false);
+                             FluxFeatures.setSeed(context, 207, 22);
+                             rebuildStack();
+                             updateUi(true);
+                         } else {
+                             choose(hue, sat);
+                         }
                      }
                  });
                  swatches.add(sw);
@@ -4355,10 +4388,29 @@ jobs:
              }
              private int color(Role r) {
                  boolean dark = FluxFeatures.isDark(getContext());
-                 if (hue < 0) {
+                 if (hue == -1) {
+                     // Системные — берём из обоев Android 12+
                      return Build.VERSION.SDK_INT >= 31 ? FluxFeatures.systemColor(getContext(), r, dark) : 0xFF888888;
+                 } else if (hue == -2) {
+                     // Material You — акцент из системного цвета Android 12+
+                     return Build.VERSION.SDK_INT >= 31 ? FluxFeatures.systemColor(getContext(), r, dark)
+                             : FluxFeatures.paletteColor(r, dark, 265, 0.55f);
+                 } else if (hue == -3) {
+                     // iPhone — серо-голубой iOS palette (hue≈207, sat=22%)
+                     return FluxFeatures.paletteColor(r, dark, 207, 0.22f);
                  }
                  return FluxFeatures.paletteColor(r, dark, hue, sat / 100f);
+             }
+             /** Возвращает true, если этот свотч сейчас выбран */
+             private boolean isSelected() {
+                 Context ctx = getContext();
+                 boolean myOn = FluxFeatures.isMaterialYou(ctx);
+                 int sh = FluxFeatures.seedHue(ctx);
+                 int ss = FluxFeatures.seedSat(ctx);
+                 if (hue == -2) return myOn && sh < 0;      // Material You: MYou вкл + системный seed
+                 if (hue == -3) return !myOn && sh == 207 && ss == 22;  // iPhone
+                 if (hue == -1) return !myOn && sh < 0;     // Системные: MYou выкл + системный seed
+                 return !myOn && sh == hue && ss == sat;
              }
              @Override
              protected void onDraw(Canvas canvas) {
@@ -4372,8 +4424,7 @@ jobs:
                  canvas.drawArc(new RectF(cx - r, cy - r, cx + r, cy + r), -90, 180, true, p);
                  p.setColor(color(Role.TERTIARY));
                  canvas.drawCircle(cx, cy, r * 0.35f, p);
-                 boolean sel = FluxFeatures.seedHue(getContext()) == hue && (hue < 0 || FluxFeatures.seedSat(getContext()) == sat);
-                 if (sel) {
+                 if (isSelected()) {
                      p.setStyle(Paint.Style.STROKE);
                      p.setStrokeWidth(AndroidUtilities.dp(3));
                      p.setColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
