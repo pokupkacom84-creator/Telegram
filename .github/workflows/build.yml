@@ -5754,9 +5754,9 @@ jobs:
       private static volatile Runnable listener;
       private static volatile List<Entry> list = new ArrayList<>();
       public static final class Entry {
-       final String host;
-       final int port;
-       final String secret;
+       public final String host;
+       public final int port;
+       public final String secret;
        Entry(String h, int p, String s) {
         host = h;
         port = p;
