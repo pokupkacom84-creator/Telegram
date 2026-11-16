@@ -9814,14 +9814,7 @@ jobs:
      # Защита FluxProxy от вырезания R8/ProGuard
      RULES_FILE=$(find . -name "proguard-rules.pro" | grep -v jni | head -1)
      if [ -n "$RULES_FILE" ]; then
-       cat >> "$RULES_FILE" << 'EOF'
--keep class org.telegram.messenger.FluxProxy { *; }
--keep class org.telegram.messenger.FluxProxy$Entry { *; }
--keepclassmembers class org.telegram.messenger.FluxProxy {
-    public static long[] pingAll(int);
-    public static java.util.List getList();
-}
-EOF
+       printf '\n-keep class org.telegram.messenger.FluxProxy { *; }\n-keep class org.telegram.messenger.FluxProxy$Entry { *; }\n-keepclassmembers class org.telegram.messenger.FluxProxy {\n    public static long[] pingAll(int);\n    public static java.util.List getList();\n}\n' >> "$RULES_FILE"
      fi
      chmod +x gradlew
      EXTRA=""
