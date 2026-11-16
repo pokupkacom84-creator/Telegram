@@ -4401,8 +4401,7 @@ jobs:
                  }
                  return FluxFeatures.paletteColor(r, dark, hue, sat / 100f);
              }
-             /** Возвращает true, если этот свотч сейчас выбран */
-             private boolean isSelected() {
+             private boolean isSwatchSelected() {
                  Context ctx = getContext();
                  boolean myOn = FluxFeatures.isMaterialYou(ctx);
                  int sh = FluxFeatures.seedHue(ctx);
@@ -4424,7 +4423,7 @@ jobs:
                  canvas.drawArc(new RectF(cx - r, cy - r, cx + r, cy + r), -90, 180, true, p);
                  p.setColor(color(Role.TERTIARY));
                  canvas.drawCircle(cx, cy, r * 0.35f, p);
-                 if (isSelected()) {
+                 if (isSwatchSelected()) {
                      p.setStyle(Paint.Style.STROKE);
                      p.setStrokeWidth(AndroidUtilities.dp(3));
                      p.setColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
