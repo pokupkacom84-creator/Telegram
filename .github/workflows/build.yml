@@ -5753,7 +5753,7 @@ jobs:
       private static long lastRotate;
       private static volatile Runnable listener;
       private static volatile List<Entry> list = new ArrayList<>();
-      static final class Entry {
+      public static final class Entry {
        final String host;
        final int port;
        final String secret;
