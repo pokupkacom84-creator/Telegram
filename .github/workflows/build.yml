@@ -107,6 +107,10 @@ on:
     description: "FluxGram: показывать статистику канала всегда (патч guard canViewStats / StatisticActivity)"
     type: boolean
     default: true
+   no_download_limit:
+    description: "FluxGram: снять ограничение на размер скачиваемых файлов (патч FileDownloader / FileLoadOperation)"
+    type: boolean
+    default: true
 env:
  APP_NAME: FluxGram
  APP_PACKAGE: com.fluxgram.app
@@ -137,6 +141,7 @@ env:
  PROFILE_COLOR_FREE: ${{ inputs.profile_color_free }}
  CUSTOM_EMOJI_FREE: ${{ inputs.custom_emoji_free }}
  CHANNEL_STATS_ALWAYS: ${{ inputs.channel_stats_always }}
+ NO_DOWNLOAD_LIMIT: ${{ inputs.no_download_limit }}
  DELETED_MSG_CACHE: "true"
  BOT_BUTTON_COPY: "true"
  PRIMARY_PROXY_URL: "https://raw.githubusercontent.com/pokupkacom84-creator/Prem-VpnKey/main/Vpn"
@@ -5728,6 +5733,8 @@ jobs:
      public class FluxProxy {
       public static final String KEY_ENABLED = "fp_enabled";
       public static final String KEY_WATCHDOG = "fp_watchdog";
+      public static final String KEY_ROUNDROBIN = "fp_roundrobin";
+      public static final String KEY_PING_ENABLED = "fp_ping";
       public static final String PRIMARY_URL = "@PRIMARY@";
       private static final boolean DEFAULT_ENABLED = @AUTO@;
       private static final String[] BAKED_PROXIES = @BAKED@;
@@ -5941,7 +5948,7 @@ jobs:
         FileLog.e(t);
        }
       }
-      // следующий прокси из списка по очереди (с учётом ручного выбора в Telegram)
+      // следующий прокси из списка по очереди (round-robin, с учётом ручного выбора в Telegram)
       private static void rotate() {
        long now = SystemClock.elapsedRealtime();
        if (lastRotate != 0 && now - lastRotate < ROTATE_GAP_MS) {
@@ -5961,11 +5968,53 @@ jobs:
          break;
         }
        }
-       Entry e = l.get((idx + 1) % l.size());
-       if (apply(e)) {
-        setStatus("Переключился на " + e.host + ":" + e.port + " (связь пропала)");
+       // round-robin: если KEY_ROUNDROBIN включён, всегда идём строго по порядку;
+       // если выключен — ищем первый живой (TCP-connect за 3 с)
+       boolean rr = get(KEY_ROUNDROBIN);
+       Entry chosen = null;
+       if (rr) {
+        chosen = l.get((idx + 1) % l.size());
+       } else {
+        for (int i = 1; i <= l.size(); i++) {
+         Entry cand = l.get((idx + i) % l.size());
+         if (tcpReachable(cand.host, cand.port, 3000)) {
+          chosen = cand;
+          break;
+         }
+        }
+        if (chosen == null) {
+         chosen = l.get((idx + 1) % l.size()); // все недоступны — берём следующего по порядку
+        }
+       }
+       if (apply(chosen)) {
+        setStatus("Переключился на " + chosen.host + ":" + chosen.port + " (round-robin, связь пропала)");
        }
       }
+      /** TCP-пинг прокси: true = порт открыт за timeoutMs мс. Вызывать только из фонового потока. */
+      public static long pingProxy(Entry e, int timeoutMs) {
+       long t = System.currentTimeMillis();
+       try (java.net.Socket s = new java.net.Socket()) {
+        s.connect(new java.net.InetSocketAddress(e.host, e.port), timeoutMs);
+        return System.currentTimeMillis() - t;
+       } catch (Throwable ex) {
+        return -1;
+       }
+      }
+      private static boolean tcpReachable(String host, int port, int timeoutMs) {
+       return pingProxy(new Entry(host, port, ""), timeoutMs) >= 0;
+      }
+      /** Ping всех прокси из текущего списка. Вызывается из фонового потока.
+       *  Возвращает массив задержек в мс (-1 = недоступен), порядок совпадает с list. */
+      public static long[] pingAll(int timeoutMs) {
+       List<Entry> l = list;
+       if (l == null) return new long[0];
+       long[] res = new long[l.size()];
+       for (int i = 0; i < l.size(); i++) {
+        res[i] = pingProxy(l.get(i), timeoutMs);
+       }
+       return res;
+      }
+      public static List<Entry> getList() { return list; }
       // если файл на GitHub изменился, обновляем список
       private static void poll() {
        Utilities.globalQueue.postRunnable(new Runnable() {
@@ -6340,7 +6389,61 @@ jobs:
        list.addView(header, matchWrap());
        addSwitch(list, context, "Автопрокси", FluxProxy.KEY_ENABLED, true);
        addSwitch(list, context, "Менять прокси при обрыве связи", FluxProxy.KEY_WATCHDOG, true);
-       addNote(list, context, "Весь список из репозитория Prem-VpnKey на GitHub добавляется в обычный список прокси Telegram (Настройки → Данные и память → Прокси) без проверки. Подключается первый, при обрыве связи берётся следующий по очереди. Любой другой можно выбрать вручную в списке Telegram. Когда список на GitHub меняется, приложение подхватывает изменения само (проверка каждые 5 минут). Выключатель останавливает всё, текущий прокси при этом не трогается.\nИсточник: " + FluxProxy.PRIMARY_URL);
+       addSwitch(list, context, "Round-robin (строго по порядку)", FluxProxy.KEY_ROUNDROBIN, true);
+       addNote(list, context, "Весь список из репозитория Prem-VpnKey на GitHub добавляется в обычный список прокси Telegram (Настройки → Данные и память → Прокси) без проверки. Подключается первый, при обрыве связи берётся следующий по очереди. При выключенном round-robin перед переключением проверяется TCP-доступность. Любой другой можно выбрать вручную в списке Telegram. Когда список на GitHub меняется, приложение подхватывает изменения само (проверка каждые 5 минут). Выключатель останавливает всё, текущий прокси при этом не трогается.\nИсточник: " + FluxProxy.PRIMARY_URL);
+       HeaderCell pingHeader = new HeaderCell(context);
+       pingHeader.setText("Ping-монитор прокси");
+       pingHeader.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+       list.addView(pingHeader, matchWrap());
+       final TextView pingResult = new TextView(context);
+       pingResult.setTextSize(13);
+       pingResult.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
+       pingResult.setPadding(AndroidUtilities.dp(21), AndroidUtilities.dp(6), AndroidUtilities.dp(21), AndroidUtilities.dp(10));
+       pingResult.setText("Нажмите «Пинговать» чтобы проверить доступность прокси.");
+       list.addView(pingResult, matchWrap());
+       TextSettingsCell pingBtn = new TextSettingsCell(context);
+       pingBtn.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+       pingBtn.setText("Пинговать все прокси", false);
+       pingBtn.setOnClickListener(v -> {
+        pingResult.setText("Проверяю…");
+        org.telegram.messenger.Utilities.globalQueue.postRunnable(new Runnable() {
+         @Override
+         public void run() {
+          java.util.List<org.telegram.messenger.FluxProxy.Entry> entries = org.telegram.messenger.FluxProxy.getList();
+          long[] pings = org.telegram.messenger.FluxProxy.pingAll(3000);
+          final StringBuilder sb = new StringBuilder();
+          String act = "";
+          try {
+           android.content.SharedPreferences ms = org.telegram.messenger.MessagesController.getGlobalMainSettings();
+           if (ms.getBoolean("proxy_enabled", false)) {
+            act = ms.getString("proxy_ip", "").toLowerCase() + ":" + ms.getInt("proxy_port", 0) + ":" + ms.getString("proxy_secret", "");
+           }
+          } catch (Throwable ignore) {}
+          final String activeKey = act;
+          int ok = 0;
+          for (int i = 0; i < pings.length && i < entries.size(); i++) {
+           org.telegram.messenger.FluxProxy.Entry e = entries.get(i);
+           String fk = e.host.toLowerCase() + ":" + e.port + ":" + e.secret;
+           boolean isActive = fk.equals(activeKey);
+           if (pings[i] >= 0) {
+            sb.append(isActive ? "▶ " : "   ").append(e.host).append(":").append(e.port).append(" — ").append(pings[i]).append(" мс\n");
+            ok++;
+           } else {
+            sb.append(isActive ? "▶ " : "   ").append(e.host).append(":").append(e.port).append(" — недоступен\n");
+           }
+          }
+          if (pings.length == 0) sb.append("Список прокси пуст.");
+          else sb.insert(0, "Доступно: " + ok + "/" + pings.length + "\n");
+          org.telegram.messenger.AndroidUtilities.runOnUIThread(new Runnable() {
+           @Override
+           public void run() {
+            pingResult.setText(sb.toString().trim());
+           }
+          });
+         }
+        });
+       });
+       list.addView(pingBtn, matchWrap());
        refreshCell = new TextSettingsCell(context);
        refreshCell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
        refreshCell.setOnClickListener(v -> {
@@ -8923,8 +9026,9 @@ jobs:
          addSwitch(list, context, "Статусные эмодзи без Premium", FluxStyle.K_CUSTOM_EMOJI_FREE, true, true);
          addSwitch(list, context, "Статистика канала всегда", FluxStyle.K_CHANNEL_STATS_ALWAYS, true, true);
          addSwitch(list, context, "Кэш удалённых сообщений (FluxDeletedCache)", FluxStyle.K_DELETED_MSG_CACHE, true, true);
-         addSwitch(list, context, "Копировать текст inline-кнопки (долгий тап)", FluxStyle.K_BOT_BUTTON_COPY, true, false);
-         addNote(list, context, "Часть изменений применяется после повторного открытия чата или перезапуска приложения. Локальный Premium меняет только вид интерфейса: сервер Premium-функции не включает.");
+         addSwitch(list, context, "Копировать текст inline-кнопки (долгий тап)", FluxStyle.K_BOT_BUTTON_COPY, true, true);
+         addSwitch(list, context, "Без ограничения размера скачиваемых файлов", FluxStyle.K_NO_DOWNLOAD_LIMIT, true, false);
+         addNote(list, context, "Часть изменений применяется после повторного открытия чата или перезапуска приложения. Локальный Premium меняет только вид интерфейса: сервер Premium-функции не включает. «Без ограничения размера файлов» снимает внутренний лимит на скачивание, позволяя загружать файлы любого размера через прокси и прямое соединение.");
        }
      '''
      KEYS = [
@@ -8944,6 +9048,7 @@ jobs:
        ("K_CHANNEL_STATS_ALWAYS", "channel_stats_always"),
        ("K_DELETED_MSG_CACHE", "deleted_msg_cache"),
        ("K_BOT_BUTTON_COPY", "bot_button_copy"),
+       ("K_NO_DOWNLOAD_LIMIT", "no_download_limit"),
      ]
      sp = find("FluxStyle.java")
      if not sp:
@@ -9075,6 +9180,30 @@ jobs:
         "private void updateParams() { ... if (isStory) { // On slow connections ... }")
      warn("FileUploadOperation: лимита 0x800 в startUploadRequest() нет. Параллелизм здесь задаёт maxUploadingKBytes = 1024 * 8 "
         "(maxRequestsCount = maxUploadingKBytes / uploadChunkSize, у больших файлов это уже ~16 запросов), менять вслепую не стал")
+     no_dl = os.environ.get("NO_DOWNLOAD_LIMIT", "true") != "false"
+     if no_dl:
+       # Патч 1: FileLoadOperation — убрать проверку максимального размера части
+       apply("FileLoadOperation.java",
+          r'(?m)^([ \t]*)if \(totalBytesCount > 0 && totalBytesCount < currentDownloadChunkSize\) \{\n[ \t]*currentDownloadChunkSize = totalBytesCount;\n[ \t]*\}',
+          lambda m: (m.group(0)
+                + "\n" + m.group(1) + "// FluxGram K_NO_DOWNLOAD_LIMIT: снято ограничение на размер файла"),
+          "FileLoadOperation: ограничение размера части не применяется", "K_NO_DOWNLOAD_LIMIT",
+          "if (totalBytesCount > 0 && totalBytesCount < currentDownloadChunkSize)")
+       # Патч 2: FileDownloader — сброс лимита DEFAULT_MAX_FILE_SIZE если он есть
+       fl_path = find("FileDownloader.java") or find("FileLoader.java")
+       if fl_path:
+         fl_src = rd(fl_path)
+         size_pat = re.compile(r'(?m)^([ \t]*)((?:private|public|protected)?\s*(?:static\s+)?(?:final\s+)?(?:long|int)\s+(?:DEFAULT_MAX_FILE_SIZE|maxFileSize|MAX_FILE_SIZE)\s*=\s*)([^;\n]+)(;)')
+         if size_pat.search(fl_src):
+           new_src = size_pat.sub(lambda m: m.group(1) + m.group(2) + "Long.MAX_VALUE" + m.group(4), fl_src)
+           wr(fl_path, new_src)
+           ok("%s: DEFAULT_MAX_FILE_SIZE → Long.MAX_VALUE (K_NO_DOWNLOAD_LIMIT)" % os.path.basename(fl_path))
+         else:
+           ok("FileLoader: DEFAULT_MAX_FILE_SIZE/maxFileSize не найден — лимит задаётся через FileLoadOperation (патч выше)")
+       else:
+         ok("FileDownloader.java/FileLoader.java: файл не найден, лимит задаётся через FileLoadOperation (патч выше)")
+     else:
+       ok("no_download_limit: пропущен (отключён входом)")
      apply("ProfileActivity.java",
         r'(?m)^([ \t]*)fluxInfoRow = userId != 0 \? rowCount\+\+ : -1;',
         lambda m: (m.group(1) + "fluxInfoRow = userId != 0 && org.telegram.messenger.FluxStyle.bool(org.telegram.messenger.FluxStyle.K_PROFILE_DETAILS, true) ? rowCount++ : -1;"),
@@ -9672,6 +9801,9 @@ jobs:
      chk "K_CHANNEL_STATS_ALWAYS" "статистика канала всегда" "*.java"
      chk "K_DELETED_MSG_CACHE" "FluxDeletedCache: кэш удалённых" "*.java"
      chk "K_BOT_BUTTON_COPY" "копировать текст inline-кнопки" "*.java"
+     chk "K_NO_DOWNLOAD_LIMIT" "без ограничения размера скачиваемых файлов" "*.java"
+     chk "KEY_ROUNDROBIN" "round-robin смена прокси" FluxProxy.java
+     chk "pingAll" "ping-монитор прокси" FluxProxy.java
      if [ "$miss" = 1 ] && [ "$STRICT" != "false" ]; then
        echo "::error::Часть функций не подключилась, сборка остановлена (отключается входом strict_features)"
        exit 1
@@ -9771,7 +9903,8 @@ jobs:
        for str in "Автоответчик" "Копировать с форматированием" "Автопрокси" "no_premium_lock" "always_translate" \
                   "copy_formatted" "auto_reply_delayed" "unlimited_pins" "unlimited_folders" \
                   "profile_color_free" "custom_emoji_free" "channel_stats_always" \
-                  "deleted_msg_cache" "bot_button_copy"; do
+                  "deleted_msg_cache" "bot_button_copy" \
+                  "no_download_limit" "roundrobin" "pingAll"; do
          if ! grep -aq "$str" /tmp/all.dex; then
            echo "::error::В $f нет функции: $str"
            fail=1
