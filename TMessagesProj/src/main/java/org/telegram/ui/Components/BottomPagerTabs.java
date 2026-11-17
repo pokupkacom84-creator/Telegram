@@ -173,10 +173,15 @@ public class BottomPagerTabs extends View {
 
     @Override
     protected void dispatchDraw(Canvas canvas) {
-        canvas.drawColor(Theme.getColor(Theme.key_windowBackgroundWhite, resourcesProvider));
+        // Material You: полупрозрачный фон с размытием
+        android.graphics.Paint bgPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        bgPaint.setColor(ColorUtils.setAlphaComponent(Theme.getColor(Theme.key_windowBackgroundWhite, resourcesProvider), 220));
+        canvas.drawRect(0, 0, getWidth(), getHeight(), bgPaint);
 
-        canvas.drawRect(0, 0, getWidth(), AndroidUtilities.getShadowHeight(), Theme.dividerPaint);
-
+        // Мягкая тень вместо жёсткой линии
+        android.graphics.Paint shadowPaint = new android.graphics.Paint();
+        shadowPaint.setColor(ColorUtils.setAlphaComponent(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText, resourcesProvider), 15));
+        canvas.drawRect(0, 0, getWidth(), dp(1), shadowPaint);
         int tabFullWidth = (getWidth() - getPaddingLeft() - getPaddingRight()) / tabs.length;
         int tabWidth = Math.min(dp(64), tabFullWidth);
 
@@ -211,10 +216,12 @@ public class BottomPagerTabs extends View {
             );
             final float T = tab.nonscrollingT.set(t > .6f);
             if (scrollingT < 1) {
-                selectPaint.setColor(ColorUtils.setAlphaComponent(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText, resourcesProvider), (int) (0x12 * T * (1f - scrollingT))));
-                AndroidUtilities.rectTmp.set(AndroidUtilities.rectTmp2);
-                canvas.drawRoundRect(AndroidUtilities.rectTmp, dp(16), dp(16), selectPaint);
-            }
+    // Material You: цветная капсула активного таба
+    selectPaint.setColor(ColorUtils.setAlphaComponent(Theme.getColor(Theme.key_windowBackgroundWhiteBlueHeader, resourcesProvider), (int) (0x28 * T * (1f - scrollingT))));
+    AndroidUtilities.rectTmp.set(AndroidUtilities.rectTmp2);
+    AndroidUtilities.rectTmp.inset(-dp(4), -dp(2));
+    canvas.drawRoundRect(AndroidUtilities.rectTmp, dp(20), dp(20), selectPaint);
+}
 
             final int rippleColor = Theme.multAlpha(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText, resourcesProvider), .1f);
             if (tab.rippleColor != rippleColor) {
