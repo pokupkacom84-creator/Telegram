@@ -190,14 +190,14 @@ public class MusicActivity extends BaseFragment implements NotificationCenter.No
         super.onPause();
         NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.musicDidLoad);
         NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.messagePlayingDidStart);
-        NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.messagePlayingDidFinish);
+        NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.messagePlayingDidReset);
     }
 
     @Override
     public void didReceivedNotification(int id, int account, Object... args) {
         if (id == NotificationCenter.musicDidLoad ||
             id == NotificationCenter.messagePlayingDidStart ||
-            id == NotificationCenter.messagePlayingDidFinish) {
+            id == NotificationCenter.messagePlayingDidReset) {
             loadData();
         }
     }
