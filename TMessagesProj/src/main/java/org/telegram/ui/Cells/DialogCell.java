@@ -3858,7 +3858,7 @@ if (user != null && !user.bot && !UserObject.isUserSelf(user) && !UserObject.isR
                 boolean needInvalidate = false;
 
         // Material You card background
-        if (isSelected || unreadCount > 0 || mentionUnreadCount > 0) {
+        if (isSelected || unreadCount > 0) {
             float radius = dp(16);
             android.graphics.RectF cardRect = new android.graphics.RectF(dp(8), dp(4), getMeasuredWidth() - dp(8), getMeasuredHeight() - dp(4));
             android.graphics.Paint cardPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
