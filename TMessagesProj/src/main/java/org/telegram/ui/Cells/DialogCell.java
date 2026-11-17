@@ -2437,6 +2437,9 @@ public class DialogCell extends BaseCell implements StoriesListPlaceProvider.Ava
                 nameString = ((String) nameString).replace('\n', ' ');
             }
             CharSequence nameStringFinal = nameString;
+if (user != null && !user.bot && !UserObject.isUserSelf(user) && !UserObject.isReplyUser(user)) {
+    nameStringFinal = org.telegram.messenger.FluxBadge.wrapUser(getContext(), nameStringFinal, user);
+}
             if (nameLayoutEllipsizeByGradient) {
                 nameLayoutFits = nameStringFinal.length() == TextUtils.ellipsize(nameStringFinal, Theme.dialogs_namePaint[paintIndex], ellipsizeWidth, TextUtils.TruncateAt.END).length();
                 ellipsizeWidth += dp(48);
