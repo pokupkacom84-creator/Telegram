@@ -3855,8 +3855,16 @@ if (user != null && !user.bot && !UserObject.isUserSelf(user) && !UserObject.isR
             return;
         }
 
-        boolean needInvalidate = false;
+                boolean needInvalidate = false;
 
+        // Material You card background
+        if (isSelected || unreadCount > 0 || mentionUnreadCount > 0) {
+            float radius = dp(16);
+            android.graphics.RectF cardRect = new android.graphics.RectF(dp(8), dp(4), getMeasuredWidth() - dp(8), getMeasuredHeight() - dp(4));
+            android.graphics.Paint cardPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+            cardPaint.setColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueHeader) & 0x22FFFFFF);
+            canvas.drawRoundRect(cardRect, radius, radius, cardPaint);
+        }
         if (drawArchive && (currentDialogFolderId != 0 || isTopic && forumTopic != null && forumTopic.id == 1) && archivedChatsDrawable != null && archivedChatsDrawable.outProgress == 0.0f && translationX == 0.0f) {
             canvas.save();
             canvas.translate(0, -translateY - rightFragmentOffset);
