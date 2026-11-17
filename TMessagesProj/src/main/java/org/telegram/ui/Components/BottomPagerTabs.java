@@ -173,15 +173,17 @@ public class BottomPagerTabs extends View {
 
     @Override
     protected void dispatchDraw(Canvas canvas) {
-        // Material You: полупрозрачный фон с размытием
-        android.graphics.Paint bgPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        bgPaint.setColor(ColorUtils.setAlphaComponent(Theme.getColor(Theme.key_windowBackgroundWhite, resourcesProvider), 220));
-        canvas.drawRect(0, 0, getWidth(), getHeight(), bgPaint);
+        // Плавающий бар с закруглёнными углами
+android.graphics.Paint bgPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+bgPaint.setColor(ColorUtils.setAlphaComponent(Theme.getColor(Theme.key_windowBackgroundWhite, resourcesProvider), 230));
+android.graphics.RectF barRect = new android.graphics.RectF(dp(12), dp(6), getWidth() - dp(12), getHeight() - dp(6));
+canvas.drawRoundRect(barRect, dp(28), dp(28), bgPaint);
 
-        // Мягкая тень вместо жёсткой линии
-        android.graphics.Paint shadowPaint = new android.graphics.Paint();
-        shadowPaint.setColor(ColorUtils.setAlphaComponent(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText, resourcesProvider), 15));
-        canvas.drawRect(0, 0, getWidth(), dp(1), shadowPaint);
+// Тень вокруг бара
+android.graphics.Paint shadowPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+shadowPaint.setColor(ColorUtils.setAlphaComponent(0x000000, 18));
+shadowPaint.setShadowLayer(dp(8), 0, dp(2), ColorUtils.setAlphaComponent(0x000000, 40));
+canvas.drawRoundRect(barRect, dp(28), dp(28), shadowPaint);
         int tabFullWidth = (getWidth() - getPaddingLeft() - getPaddingRight()) / tabs.length;
         int tabWidth = Math.min(dp(64), tabFullWidth);
 
