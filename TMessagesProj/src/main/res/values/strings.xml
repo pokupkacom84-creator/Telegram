@@ -10626,6 +10626,12 @@
     <string name="MainTabsChats">Chats</string>
     <string name="MainTabsProfile">Profile</string>
     <string name="MainTabsSettings">Settings</string>
+    <string name="MainTabsMusic">Music</string>
+    <string name="MusicLiked">Liked</string>
+    <string name="MusicLikedHint">Tap the heart on a song and it will appear here. Liked songs play even without internet.</string>
+    <string name="MusicRecentlyPlayed">Recently played</string>
+    <string name="MusicPlaylists">Playlists</string>
+    <string name="MusicFromChats">From your chats</string>
     <string name="SwitchThemeToDay">Day Mode</string>
     <string name="SwitchThemeToNight">Night Mode</string>
 
