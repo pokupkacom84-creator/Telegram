@@ -4744,13 +4744,22 @@ jobs:
      if "FluxBadge" in s:
        ok("DialogCell: уже пропатчен")
      elif s:
-       pat = re.compile(r'(?m)^([ \t]*)if \(nameString\.length\(\) == 0\) \{\n')
-       if not re.search(r'CharSequence\s+nameString\b', s) or len(pat.findall(s)) != 1:
+       # Пробуем несколько возможных якорей имени
+       pat = re.compile(r'(?m)^([ \t]*)if\s*\(\s*nameString\s*(?:==\s*null|!=\s*null|\.\s*length\s*\(\s*\)\s*(?:==|<=)\s*0)\s*\)\s*\{')
+       if not pat.search(s):
+         # Запасной вариант — ищем по месту присвоения nameString
+         pat = re.compile(r'(?m)^([ \t]*)((?:nameLayout|nameDrawable|namePaint)\s*=\s*[^\n]+\n)')
+       if not pat.search(s):
+         # Последний вариант — строка с user.first_name или getName
+         pat = re.compile(r'(?m)^([ \t]*)(?:nameString\s*=\s*(?:UserObject\.getUserName|getName|ContactsController\.formatName)[^\n]+\n)')
+       m_anchor = pat.search(s)
+       if not m_anchor:
          warn("DialogCell.java: якорь имени не найден, значок в списке чатов не подключён (в шапке чата и профиле он будет)")
        else:
-         s = pat.sub(lambda m: m.group(1) + "if (user != null && !user.bot && !UserObject.isUserSelf(user) && !UserObject.isReplyUser(user)) {\n" +
-               m.group(1) + "    nameString = FluxBadge.wrapUser(getContext(), nameString, user);\n" +
-               m.group(1) + "}\n" + m.group(0), s, count=1)
+         inject = (m_anchor.group(1) + "if (user != null && !user.bot && !UserObject.isUserSelf(user) && !UserObject.isReplyUser(user)) {\n" +
+                   m_anchor.group(1) + "    nameString = FluxBadge.wrapUser(getContext(), nameString, user);\n" +
+                   m_anchor.group(1) + "}\n")
+         s = s[:m_anchor.start()] + inject + s[m_anchor.start():]
          write(p, add_import(s))
          ok("DialogCell: значок FluxGram в списке чатов")
      with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
@@ -8127,7 +8136,7 @@ jobs:
        else:
          a = re.compile(r'(public\s+void\s+onResume\s*\(\s*\)\s*\{\s*super\.onResume\(\);)')
          b = re.compile(r'(public\s+void\s+onPause\s*\(\s*\)\s*\{\s*super\.onPause\(\);)')
-         d = re.compile(r'(chatListView\.setAdapter\(chatAdapter\);)')
+         d = re.compile(r'((?:chatListView|recyclerListView|messagesListView|listView)\s*\.\s*setAdapter\s*\(\s*(?:chatAdapter|messagesAdapter|adapter)\s*\)\s*;)')
          if a.search(s):
            s = a.sub(lambda m: m.group(1) + "\n        org.telegram.messenger.FluxStyle.onChatResume(currentAccount, dialog_id);", s, count=1)
            ok("ChatActivity: цвета чата по аватарке (onResume)")
@@ -8167,7 +8176,7 @@ jobs:
        if "FluxStyle.burstOnce" in s:
          ok("ChatActivityEnterView: уже пропатчен")
        else:
-         pat = re.compile(r'((?:private|public|protected)\s+(?:final\s+)?void\s+(?:sendMessageInternal|sendMessage)\s*\([^)]*\)\s*\{)')
+         pat = re.compile(r'((?:private|public|protected)\s+(?:final\s+)?void\s+(?:sendMessageInternal|sendMessage|onSendPressed|sendPressed|doSend|processSend|performSend)\s*\([^)]*\)\s*\{)')
          n = len(pat.findall(s))
          if n == 0:
            warn("ChatActivityEnterView: sendMessage/sendMessageInternal не найдены - вспышка при отправке не добавлена")
@@ -9293,11 +9302,11 @@ jobs:
      if ALWAYS_TRANSLATE:
        for fname, pat_str, lbl, sig in [
          ("MessageObject.java",
-          r'(?m)^([ \t]*)public\s+(?:static\s+)?boolean\s+(?:isTranslatable|canTranslate)\s*\([^)]*\)\s*\{',
+          r'(?m)^([ \t]*)(?:public|private|protected)\s+(?:static\s+)?boolean\s+(?:isTranslatable|canTranslate|isTranslateAvailable|canBeTranslated|isTranslationAvailable)\s*\([^)]*\)\s*\{',
           "isTranslatable/canTranslate перехвачены",
           "public boolean isTranslatable/canTranslate(...) { в MessageObject.java"),
          ("TranslateAlert.java",
-          r'(?m)^([ \t]*)(?:public|private|protected)\s+(?:static\s+)?boolean\s+(?:isTranslatable|canTranslate|shouldShowTranslate)\s*\([^)]*\)\s*\{',
+          r'(?m)^([ \t]*)(?:public|private|protected)\s+(?:static\s+)?boolean\s+(?:isTranslatable|canTranslate|shouldShowTranslate|isTranslateAvailable|canBeTranslated|showTranslateButton|needShowTranslate)\s*\([^)]*\)\s*\{',
           "TranslateAlert: isTranslatable/canTranslate/shouldShowTranslate перехвачены",
           "boolean isTranslatable/canTranslate/shouldShowTranslate(...) { в TranslateAlert.java"),
        ]:
@@ -9368,8 +9377,11 @@ jobs:
        if "K_AUTO_REPLY_DELAYED" in s:
          ok("AutoReply.java: K_AUTO_REPLY_DELAYED уже есть")
        else:
-         send_pat = re.compile(r'([ \t]*)(AndroidUtilities\.runOnUIThread\(\s*\(\)\s*->\s*\{[^}]*prepareSendingText[^;]+;[^}]*\}\s*\);)', re.S)
+         send_pat = re.compile(r'([ \t]*)(AndroidUtilities\.runOnUIThread\(\s*\(\)\s*->\s*\{[^}]*(?:prepareSendingText|sendMessage|doSendMessage|performSendMessage)[^;]+;[^}]*\}\s*\);)', re.S)
          m = send_pat.search(s)
+         if not m:
+           send_pat2 = re.compile(r'([ \t]*)(?:// ?отправляем|// ?send)(.*?\n){0,3}?([ \t]*)(\w+\.sendMessage[^;]+;)', re.S)
+           m = send_pat2.search(s)
          if m:
            ind = m.group(1)
            delayed = (ind + "if (FluxStyle.bool(FluxStyle.K_AUTO_REPLY_DELAYED, false)) {\n"
@@ -9384,15 +9396,19 @@ jobs:
            wr(ar_path, s)
            ok("AutoReply: отправка через 5 мин при K_AUTO_REPLY_DELAYED")
          else:
-           cooldown_pat = re.compile(r'([ \t]*)long cooldown = COOLDOWN_VALUES\[cooldown\(\)\];')
+           cooldown_pat = re.compile(r'([ \t]*)long cooldown\s*=\s*(?:COOLDOWN_VALUES\[\w+\(\)\]|getCooldown\(\)|\w+Cooldown\b)[^;]*;')
            m2 = cooldown_pat.search(s)
+           if not m2:
+             cooldown_pat2 = re.compile(r'([ \t]*)(?:long|int)\s+(?:cooldown|delay|interval)\s*=\s*[^;]+;')
+             m2 = cooldown_pat2.search(s)
            if m2:
              ind = m2.group(1)
-             inject = (ind + "long cooldown = COOLDOWN_VALUES[cooldown()];\n"
+             orig = m2.group(0)
+             inject = (orig + "\n"
                   + ind + "if (FluxStyle.bool(FluxStyle.K_AUTO_REPLY_DELAYED, false)) {\n"
                   + ind + "    cooldown = Math.max(cooldown, 300_000L); // 5 min floor, K_AUTO_REPLY_DELAYED\n"
                   + ind + "}")
-             s = s.replace(m2.group(0), inject, 1)
+             s = s.replace(orig, inject, 1)
              wr(ar_path, s)
              ok("AutoReply: задержка 5 мин как нижняя граница cooldown (K_AUTO_REPLY_DELAYED)")
            else:
@@ -9403,7 +9419,7 @@ jobs:
      if UNLIMITED_PINS:
        pinned_targets = [
          (MSG + "/MessagesController.java",
-          re.compile(r'(?m)^([ \t]*)if\s*\(\s*(?:pinnedCount|getPinnedDialogsCount\([^)]*\))\s*>=?\s*\d+\s*\)'),
+          re.compile(r'(?m)^([ \t]*)if\s*\(\s*(?:pinnedCount|getPinnedDialogsCount\([^)]*\)|pinnedDialogsCount|pinnedChatsCount|pinned_dialogs_count)\s*>=?\s*\d+\s*\)'),
           "K_UNLIMITED_PINS"),
        ]
        for path, pat, key in pinned_targets:
@@ -9447,6 +9463,10 @@ jobs:
           re.compile(r'(?m)^([ \t]*)if\s*\(\s*\w*[Ff]older[Cc]ount\w*\s*>=?\s*\d+\s*\)')),
          (MSG + "/MessagesController.java",
           re.compile(r'(?m)^([ \t]*)if\s*\(\s*dialogFilters\.size\(\)\s*>=?\s*\d+\s*\)')),
+         (MSG + "/MessagesController.java",
+          re.compile(r'(?m)^([ \t]*)if\s*\(\s*(?:filters|dialogFilters|folders)\.size\(\)\s*>=?\s*\d+\s*\)')),
+         (MSG + "/MessagesController.java",
+          re.compile(r'(?m)^([ \t]*)if\s*\(\s*\w*[Ff]ilter[Cc]ount\w*\s*>=?\s*\d+\s*\)')),
        ]
        patched_folders = False
        for path, pat in folder_targets:
@@ -9463,7 +9483,7 @@ jobs:
          wr(path, result)
          ok("MessagesController: лимит папок снят (мест: %d)" % len(ms))
          patched_folders = True
-       for fname in ("FiltersSetupActivity.java", "FilterListController.java"):
+       for fname in ("FiltersSetupActivity.java", "FilterListController.java", "DialogFiltersController.java", "FiltersHelper.java", "FilterCreateActivity.java"):
          p = find(fname)
          if not p: continue
          s = rd(p)
