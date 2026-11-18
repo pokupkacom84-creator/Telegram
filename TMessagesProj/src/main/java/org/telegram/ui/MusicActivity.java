@@ -341,7 +341,7 @@ public class MusicActivity extends BaseFragment implements NotificationCenter.No
         bar.setPadding(dp(12), 0, dp(12), 0);
 
         ImageView icon = new ImageView(ctx);
-        icon.setImageResource(R.drawable.ic_ab_search);
+        icon.setImageResource(R.drawable.outline_search_1_24);
         icon.setColorFilter(new PorterDuffColorFilter(
                 Theme.getColor(Theme.key_windowBackgroundWhiteGrayIcon), PorterDuff.Mode.SRC_IN));
         bar.addView(icon, LayoutHelper.createFrame(20, 20, Gravity.CENTER_VERTICAL | Gravity.START, 0, 0, 0, 0));
@@ -454,7 +454,7 @@ public class MusicActivity extends BaseFragment implements NotificationCenter.No
 
             // album art placeholder
             ImageView art = new ImageView(scrollContent.getContext());
-            art.setImageResource(R.drawable.music_note_small);
+            art.setImageResource(R.drawable.outline_header_search);
             art.setColorFilter(new PorterDuffColorFilter(
                     Theme.getColor(Theme.key_windowBackgroundWhiteGrayIcon), PorterDuff.Mode.SRC_IN));
             art.setScaleType(ImageView.ScaleType.CENTER);
