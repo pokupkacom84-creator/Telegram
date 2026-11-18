@@ -347,7 +347,7 @@ public class MusicActivity extends BaseFragment implements NotificationCenter.No
         bar.addView(icon, LayoutHelper.createFrame(20, 20, Gravity.CENTER_VERTICAL | Gravity.START, 0, 0, 0, 0));
 
         EditText et = new EditText(ctx);
-        et.setHint(getString(R.string.MusicSearch));
+        et.setHint(getString(R.string.Search));
         et.setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText));
         et.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
         et.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
