@@ -121,7 +121,7 @@ public class MusicActivity extends BaseFragment implements NotificationCenter.No
                         MessagesStorage.getInstance(currentAccount).getDatabase().queryFinalized(
                                 "SELECT m.data, m.mid, m.uid FROM messages_v2 m " +
                                 "INNER JOIN media_v4 mv ON mv.mid = m.mid AND mv.uid = m.uid " +
-                                "WHERE mv.type = 2 " +   // type 2 = audio
+                                "WHERE mv.type = 4 " +   // type 2 = audio
                                 "ORDER BY m.date DESC LIMIT 50");
                 while (cursor.next()) {
                     try {
